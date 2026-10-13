@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Установленные программы
+Name[en]=Installed Apps
+Comment=Просмотр и удаление установленных приложений
+Comment[en]=View and uninstall installed applications
+Exec=@EXEC@
+Icon=system-software-install
+Categories=System;Settings;PackageManager;GTK;
+Keywords=uninstall;remove;apps;packages;удалить;программы;пакеты;
+StartupNotify=true
