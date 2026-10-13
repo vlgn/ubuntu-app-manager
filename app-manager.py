@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Установленные программы — список приложений (APT, Snap, Flatpak) с удалением."""
+"""Installed Apps — list and uninstall software on Ubuntu (APT, Snap, Flatpak, Lutris, manual installs)."""
 import os
 import re
 import glob
+import json
 import shlex
 import shutil
 import signal
@@ -23,6 +24,127 @@ except (ImportError, ValueError):
     DesktopAppInfo = Gio.DesktopAppInfo
 
 APP_ID = 'io.github.vlgn.AppManager'
+SETTINGS_FILE = os.path.join(os.path.expanduser('~'), '.config', 'app-manager', 'settings.json')
+
+# ---------- перевод: ключи — русские строки, EN — английский перевод
+EN = {
+    'Установленные программы': 'Installed Apps',
+    'Вручную': 'Manual', 'Защищено': 'Protected', 'Системное': 'System', 'Обычное': 'Regular', 'Ярлык': 'Shortcut',
+    'Игра Lutris': 'Lutris game', 'Файлы игры и Wine-префикс': 'Game files and Wine prefix',
+    'Настройки игры в Lutris': 'Game settings in Lutris', 'Обложка': 'Cover art',
+    'Запись в библиотеке Lutris': 'Lutris library entry', 'Ярлык в меню': 'Menu shortcut', 'Значок': 'Icon',
+    'Значки ({n} шт.)': 'Icons ({n} files)', 'Папка программы': 'Program folder',
+    'Исполняемый файл': 'Executable', 'Фоновая служба (будет остановлена)': 'Background service (will be stopped)',
+    'Автозапуск': 'Autostart entry', 'Данные и настройки': 'Data and settings',
+    'Завершён процесс {pid}: {name}\n': 'Terminated process {pid}: {name}\n',
+    'Останавливаю службу {unit}\n': 'Stopping service {unit}\n',
+    'Игра удалена из библиотеки Lutris\n': 'Game removed from the Lutris library\n',
+    'Ошибка базы Lutris: {err}\n': 'Lutris database error: {err}\n',
+    'Пропущено (небезопасный путь): {path}\n': 'Skipped (unsafe path): {path}\n',
+    'Удалено: {path}\n': 'Removed: {path}\n', 'Ошибка: {path}: {err}\n': 'Error: {path}: {err}\n',
+    'Среда выполнения': 'Runtime', 'Приложения': 'Applications', 'Все пакеты': 'All packages',
+    'Обновить список': 'Refresh', 'Разрешить удаление защищённых (опасно)': 'Allow removing protected (dangerous)',
+    'Язык': 'Language', 'Как в системе': 'System default',
+    'Поиск по названию или пакету…': 'Search by name or package…', 'Все источники': 'All sources',
+    'Любой тип': 'Any type', 'Обычные': 'Regular', 'Системные': 'System', 'Защищённые': 'Protected',
+    'Только установленные вручную': 'Manually installed only', 'Пакет': 'Package', 'Источник': 'Source',
+    'Версия': 'Version', 'Размер': 'Size', 'Тип': 'Type', 'Название': 'Name',
+    'Собираю список программ…': 'Collecting installed software…', 'Ничего не найдено': 'Nothing found',
+    'Измените запрос или фильтры': 'Try a different search or filters', 'Удалить': 'Uninstall',
+    'Нужно для работы системы — удаление может её сломать': 'Required by the system — removing it may break it',
+    'Входит в стандартную установку Ubuntu — удалять можно, но осторожно':
+        'Part of the standard Ubuntu install — can be removed, but be careful',
+    'Установлено вами — можно спокойно удалять': 'Installed by you — safe to remove',
+    'Ярлык программы, установленной не через пакетный менеджер': 'Shortcut of an app installed outside the package manager',
+    'Диск': 'Disk', 'Домашний диск': 'Home disk',
+    '{name}: занято {used} из {total}  •  свободно {free}': '{name}: {used} of {total} used  •  {free} free',
+    '{mount}: занято {pct}': '{mount}: {pct} used',
+    'Показано: {n}   •   Занимают: {size}': 'Shown: {n}   •   Total size: {size}',
+    'Программа установлена вне домашней папки и не через пакет — удалить отсюда нельзя':
+        'Installed outside your home folder and not as a package — cannot be removed here',
+    'Защищённый компонент: от него зависит работа системы. Разблокировать можно в меню ☰ (опасно).':
+        'Protected component: the system depends on it. You can unlock it in the ☰ menu (dangerous).',
+    'Удалить «{name}»': 'Uninstall “{name}”',
+    'Удаление защищённых пакетов разрешено. Будьте осторожны!': 'Removing protected packages is allowed. Be careful!',
+    'Будет удалён snap-пакет «{pkg}».': 'The snap “{pkg}” will be removed.',
+    'Будет удалён flatpak «{pkg}».': 'The flatpak “{pkg}” will be removed.',
+    'Удалить также данные приложения': 'Also delete app data',
+    'Не удалось подготовить удаление: {err}': 'Could not prepare removal: {err}', 'нечего удалять': 'nothing to remove',
+    'Удаление заблокировано': 'Removal blocked',
+    'Вместе с «{name}» будут удалены защищённые системные пакеты ({n}), без которых Ubuntu может не загрузиться '
+    'или потерять рабочий стол:\n\n{list}\n\nЕсли вы точно знаете, что делаете, включите в меню ☰ '
+    '«Разрешить удаление защищённых».':
+        'Removing “{name}” would also remove protected system packages ({n}) that Ubuntu needs to boot or show '
+        'the desktop:\n\n{list}\n\nIf you really know what you are doing, enable “Allow removing protected” '
+        'in the ☰ menu.',
+    'Понятно': 'OK', 'Будут удалены пакеты ({n}):': 'These packages will be removed ({n}):',
+    '⚠ ОПАСНО: будут удалены защищённые системные пакеты ({list}). Система может перестать работать!\n\n':
+        '⚠ DANGER: protected system packages will be removed ({list}). The system may stop working!\n\n',
+    'Внимание: будут удалены компоненты стандартной установки Ubuntu ({list}).\n\n':
+        'Note: parts of the standard Ubuntu install will be removed ({list}).\n\n',
+    'Удалить также настройки (purge)': 'Also delete settings (purge)',
+    'Не нашёл файлов программы для удаления': 'No program files found to remove',
+    'Игра установлена через Lutris.': 'This game was installed with Lutris.',
+    'Программа установлена вручную, не через пакетный менеджер.': 'This app was installed manually, not with a package manager.',
+    ' Будут удалены отмеченные пункты (без возможности восстановления):':
+        ' The checked items will be permanently deleted:',
+    '⚠ Lutris сейчас запущен — закройте его перед удалением.\n\n': '⚠ Lutris is running — close it before uninstalling.\n\n',
+    'Удалить «{name}»?': 'Uninstall “{name}”?', 'Отмена': 'Cancel', 'Программа': 'Program',
+    'Данные и настройки (оставьте, если планируете переустановить)': 'Data and settings (keep them if you plan to reinstall)',
+    '⚠ ОПАСНО: это защищённый системный компонент. Система может перестать работать!\n\n':
+        '⚠ DANGER: this is a protected system component. The system may stop working!\n\n',
+    'Внимание: это часть стандартной установки системы.\n\n': 'Note: this is part of the standard system install.\n\n',
+    'Закрыть': 'Close', 'Удаление «{name}»': 'Uninstalling “{name}”', '\n✔ Готово.\n': '\n✔ Done.\n',
+    '«{name}» удалено': '“{name}” uninstalled', '\nОтменено: пароль не введён.\n': '\nCancelled: no password entered.\n',
+    '\n✘ Ошибка (код {code}).\n': '\n✘ Failed (code {code}).\n',
+    'Язык изменён': 'Language changed',
+}
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(data):
+    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+    with open(SETTINGS_FILE, 'w') as f:
+        json.dump(data, f)
+
+
+def detect_language(choice):
+    if choice in ('ru', 'en'):
+        return choice
+    langs = [l.split('_')[0].split('.')[0] for l in GLib.get_language_names()]
+    return 'ru' if langs and langs[0] == 'ru' else 'en'
+
+
+ORIG_LANGUAGE = os.environ.get('LANGUAGE')
+
+
+def apply_language(choice):
+    """Устанавливает язык интерфейса и язык названий программ из .desktop-файлов."""
+    global LANG
+    if ORIG_LANGUAGE is None:
+        os.environ.pop('LANGUAGE', None)
+    else:
+        os.environ['LANGUAGE'] = ORIG_LANGUAGE
+    LANG = detect_language(choice)
+    if choice != 'auto':
+        os.environ['LANGUAGE'] = 'ru_RU:ru' if LANG == 'ru' else 'en_US:en'
+
+
+LANG = 'en'
+apply_language(load_settings().get('language', 'auto'))
+
+
+def tr(text, **kw):
+    if LANG == 'en':
+        text = EN.get(text, text)
+    return text.format(**kw) if kw else text
 C_ENV = dict(os.environ, LC_ALL='C', LANG='C', LANGUAGE='C')
 SOURCE_LABELS = {'apt': 'APT', 'snap': 'Snap', 'flatpak': 'Flatpak', 'local': 'Вручную', 'lutris': 'Lutris'}
 
@@ -62,9 +184,11 @@ def run(cmd):
 def human_size(n):
     if n is None or n < 0:
         return '—'
-    for unit in ('Б', 'КБ', 'МБ', 'ГБ'):
-        if n < 1024 or unit == 'ГБ':
-            return (f'{n:.0f} {unit}' if unit == 'Б' else f'{n:.1f} {unit}').replace('.', ',')
+    units = ('B', 'KB', 'MB', 'GB') if LANG == 'en' else ('Б', 'КБ', 'МБ', 'ГБ')
+    for unit in units:
+        if n < 1024 or unit == units[-1]:
+            text = f'{n:.0f} {unit}' if unit == units[0] else f'{n:.1f} {unit}'
+            return text if LANG == 'en' else text.replace('.', ',')
         n /= 1024
 
 
@@ -235,7 +359,7 @@ def classify_local(a, fn, name, desc, icon, deb, deb_level):
     cmd = a.get_commandline() or ''
     m = re.search(r'lutris:rungameid/(\d+)', cmd)
     if m:
-        item = Pkg(name, f'lutris #{m.group(1)}', 'lutris', summary=desc or 'Игра Lutris', icon=icon)
+        item = Pkg(name, f'lutris #{m.group(1)}', 'lutris', summary=desc or tr('Игра Lutris'), icon=icon)
         item.local = dict(kind='lutris', game_id=int(m.group(1)), desktop=fn, icon_name=a.get_string('Icon'))
         return item
 
@@ -378,7 +502,7 @@ def merge_icons(entries):
     if len(icons) > 1:
         first = icons[0]
         first['more'] = [e['path'] for e in icons[1:]]
-        first['label'] = f'Значки ({len(icons)} шт.)'
+        first['count'] = len(icons)
         entries = [e for e in entries if e not in icons[1:]]
     return entries
 
@@ -408,7 +532,7 @@ def kill_processes(roots, log):
         if any(p == r or p.startswith(r + '/') for p in paths for r in roots):
             try:
                 os.kill(int(pid), signal.SIGTERM)
-                log(f'Завершён процесс {pid}: {paths[1] or exe}\n')
+                log(tr('Завершён процесс {pid}: {name}\n', pid=pid, name=paths[1] or exe))
             except OSError:
                 pass
 
@@ -419,7 +543,7 @@ def remove_local(entries, log):
     for e in entries:
         if e['kind'] == 'unit':
             unit = os.path.basename(e['path'])
-            log(f'Останавливаю службу {unit}\n')
+            log(tr('Останавливаю службу {unit}\n', unit=unit))
             subprocess.run(['systemctl', '--user', 'disable', '--now', unit],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     kill_processes([e['path'] for e in entries if e['kind'] == 'path' and os.path.isdir(e['path'])]
@@ -431,24 +555,24 @@ def remove_local(entries, log):
                 con.execute('delete from games where id=?', (int(e['path']),))
                 con.commit()
                 con.close()
-                log('Игра удалена из библиотеки Lutris\n')
+                log(tr('Игра удалена из библиотеки Lutris\n'))
             except sqlite3.Error as ex:
                 errors += 1
-                log(f'Ошибка базы Lutris: {ex}\n')
+                log(tr('Ошибка базы Lutris: {err}\n', err=ex))
             continue
         for path in entry_paths(e):
             if not safe_to_delete(path):
-                log(f'Пропущено (небезопасный путь): {path}\n')
+                log(tr('Пропущено (небезопасный путь): {path}\n', path=path))
                 continue
             try:
                 if os.path.isdir(path) and not os.path.islink(path):
                     shutil.rmtree(path)
                 elif os.path.lexists(path):
                     os.remove(path)
-                log(f'Удалено: {path}\n')
+                log(tr('Удалено: {path}\n', path=path))
             except OSError as ex:
                 errors += 1
-                log(f'Ошибка: {path}: {ex}\n')
+                log(tr('Ошибка: {path}: {err}\n', path=path, err=ex))
     if any(e['kind'] == 'unit' for e in entries):
         subprocess.run(['systemctl', '--user', 'daemon-reload'])
     subprocess.run(['update-desktop-database', os.path.join(HOME, '.local/share/applications')],
@@ -548,7 +672,7 @@ def collect():
                         icons.get(('snap', name)), manual=not i['system'], level=snap_level(name, i['system'])))
     for fid, i in flats.items():
         pkgs.append(Pkg(i['name'] or fid, fid, 'flatpak', i['version'], i['size'],
-                        'Среда выполнения' if i['runtime'] else '', icons.get(('flatpak', fid)),
+                        tr('Среда выполнения') if i['runtime'] else '', icons.get(('flatpak', fid)),
                         manual=not i['runtime'], installation=i['installation'],
                         level='system' if i['runtime'] else 'user'))
     return apps, pkgs
@@ -566,7 +690,7 @@ def ordering(x, y):
 
 class Window(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title='Установленные программы',
+        super().__init__(application=app, title=tr('Установленные программы'),
                          default_width=1100, default_height=720)
         self.apps_store = Gio.ListStore(item_type=Pkg)
         self.pkgs_store = Gio.ListStore(item_type=Pkg)
@@ -581,7 +705,7 @@ class Window(Adw.ApplicationWindow):
         # Переключатель режимов из связанных кнопок (работает на любой libadwaita)
         switcher = Gtk.Box(css_classes=['linked'])
         self.mode_buttons = {}
-        for name, label in (('apps', 'Приложения'), ('pkgs', 'Все пакеты')):
+        for name, label in (('apps', tr('Приложения')), ('pkgs', tr('Все пакеты'))):
             b = Gtk.ToggleButton(label=label, active=name == 'apps')
             if self.mode_buttons:
                 b.set_group(next(iter(self.mode_buttons.values())))
@@ -589,21 +713,26 @@ class Window(Adw.ApplicationWindow):
             self.mode_buttons[name] = b
             switcher.append(b)
         header.set_title_widget(switcher)
-        refresh = Gtk.Button(icon_name='view-refresh-symbolic', tooltip_text='Обновить список')
+        refresh = Gtk.Button(icon_name='view-refresh-symbolic', tooltip_text=tr('Обновить список'))
         refresh.connect('clicked', lambda *_: self.reload())
         header.pack_start(refresh)
         menu = Gio.Menu()
-        menu.append('Разрешить удаление защищённых (опасно)', 'win.allow-protected')
+        menu.append(tr('Разрешить удаление защищённых (опасно)'), 'win.allow-protected')
+        lang_menu = Gio.Menu()
+        lang_menu.append(tr('Как в системе'), "app.language('auto')")
+        lang_menu.append('English', "app.language('en')")
+        lang_menu.append('Русский', "app.language('ru')")
+        menu.append_submenu(tr('Язык') + (' / Language' if LANG == 'ru' else ' / Язык'), lang_menu)
         header.pack_end(Gtk.MenuButton(icon_name='open-menu-symbolic', menu_model=menu))
 
         # --- Панель фильтров
-        self.search = Gtk.SearchEntry(placeholder_text='Поиск по названию или пакету…', hexpand=True)
+        self.search = Gtk.SearchEntry(placeholder_text=tr('Поиск по названию или пакету…'), hexpand=True)
         self.search.connect('search-changed', lambda *_: self.refilter())
-        self.source = Gtk.DropDown.new_from_strings(['Все источники', 'APT', 'Snap', 'Flatpak'])
+        self.source = Gtk.DropDown.new_from_strings([tr('Все источники'), 'APT', 'Snap', 'Flatpak'])
         self.source.connect('notify::selected', lambda *_: self.refilter())
-        self.level = Gtk.DropDown.new_from_strings(['Любой тип', 'Обычные', 'Системные', 'Защищённые'])
+        self.level = Gtk.DropDown.new_from_strings([tr(x) for x in ('Любой тип', 'Обычные', 'Системные', 'Защищённые')])
         self.level.connect('notify::selected', lambda *_: self.refilter())
-        self.manual_only = Gtk.CheckButton(label='Только установленные вручную', active=True, visible=False)
+        self.manual_only = Gtk.CheckButton(label=tr('Только установленные вручную'), active=True, visible=False)
         self.manual_only.connect('toggled', lambda *_: self.refilter())
         filters = Gtk.Box(spacing=8, margin_start=12, margin_end=12, margin_top=8, margin_bottom=8)
         for w in (self.search, self.source, self.level, self.manual_only):
@@ -623,26 +752,26 @@ class Window(Adw.ApplicationWindow):
 
         name_col = self.add_name_column()
         self.add_level_column()
-        self.add_text_column('Пакет', lambda i: i.pkg, lambda i: i.pkg.lower(), 220)
-        self.add_text_column('Источник', lambda i: SOURCE_LABELS[i.source], lambda i: i.source, 90)
-        self.add_text_column('Версия', lambda i: i.version, lambda i: i.version, 150)
-        self.add_text_column('Размер', lambda i: human_size(i.size), lambda i: i.size, 90, xalign=1)
+        self.add_text_column(tr('Пакет'), lambda i: i.pkg, lambda i: i.pkg.lower(), 220)
+        self.add_text_column(tr('Источник'), lambda i: tr(SOURCE_LABELS[i.source]), lambda i: i.source, 90)
+        self.add_text_column(tr('Версия'), lambda i: i.version, lambda i: i.version, 150)
+        self.add_text_column(tr('Размер'), lambda i: human_size(i.size), lambda i: i.size, 90, xalign=1)
         self.cv.sort_by_column(name_col, Gtk.SortType.ASCENDING)
 
         scroll = Gtk.ScrolledWindow(child=self.cv, vexpand=True)
         loading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                           valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
         loading.append(make_spinner(48))
-        loading.append(Gtk.Label(label='Собираю список программ…'))
+        loading.append(Gtk.Label(label=tr('Собираю список программ…')))
         self.stack = Gtk.Stack()
         self.stack.add_named(loading, 'loading')
         self.stack.add_named(scroll, 'list')
-        self.stack.add_named(Adw.StatusPage(icon_name='system-search-symbolic', title='Ничего не найдено',
-                                            description='Измените запрос или фильтры'), 'empty')
+        self.stack.add_named(Adw.StatusPage(icon_name='system-search-symbolic', title=tr('Ничего не найдено'),
+                                            description=tr('Измените запрос или фильтры')), 'empty')
 
         # --- Нижняя панель
         self.status = Gtk.Label(xalign=0, hexpand=True, ellipsize=3, css_classes=['dim-label'])
-        self.remove_btn = Gtk.Button(label='Удалить', css_classes=['destructive-action'], sensitive=False)
+        self.remove_btn = Gtk.Button(label=tr('Удалить'), css_classes=['destructive-action'], sensitive=False)
         self.remove_btn.connect('clicked', lambda *_: self.on_remove())
         bottom = Gtk.Box(spacing=8, margin_start=12, margin_end=12, margin_top=8, margin_bottom=8)
         self.disk_box = Gtk.Box(spacing=12, margin_end=12)
@@ -696,7 +825,7 @@ class Window(Adw.ApplicationWindow):
         f = Gtk.SignalListItemFactory()
         f.connect('setup', setup)
         f.connect('bind', bind)
-        col = Gtk.ColumnViewColumn(title='Название', factory=f, expand=True, resizable=True)
+        col = Gtk.ColumnViewColumn(title=tr('Название'), factory=f, expand=True, resizable=True)
         col.set_sorter(Gtk.CustomSorter.new(lambda a, b, _: ordering(a.name.lower(), b.name.lower()), None))
         self.cv.append_column(col)
         return col
@@ -712,21 +841,21 @@ class Window(Adw.ApplicationWindow):
             item, box = li.get_item(), li.get_child()
             img, lbl = box.get_first_child(), box.get_last_child()
             img.set_from_icon_name(LEVEL_ICONS[item.level])
-            lbl.set_label(LEVEL_LABELS[item.level])
+            lbl.set_label(tr(LEVEL_LABELS[item.level]))
             for c in ('error', 'warning', 'dim-label'):
                 box.remove_css_class(c)
             box.add_css_class(LEVEL_CSS.get(item.level, 'dim-label'))
-            box.set_tooltip_text({
+            box.set_tooltip_text(tr({
                 'protected': 'Нужно для работы системы — удаление может её сломать',
                 'system': 'Входит в стандартную установку Ubuntu — удалять можно, но осторожно',
                 'user': 'Установлено вами — можно спокойно удалять',
                 'shortcut': 'Ярлык программы, установленной не через пакетный менеджер',
-            }[item.level])
+            }[item.level]))
 
         f = Gtk.SignalListItemFactory()
         f.connect('setup', setup)
         f.connect('bind', bind)
-        col = Gtk.ColumnViewColumn(title='Тип', factory=f, fixed_width=160, resizable=True)
+        col = Gtk.ColumnViewColumn(title=tr('Тип'), factory=f, fixed_width=160, resizable=True)
         col.set_sorter(Gtk.CustomSorter.new(
             lambda a, b, _: ordering(LEVEL_ORDER[a.level], LEVEL_ORDER[b.level]), None))
         self.cv.append_column(col)
@@ -801,7 +930,7 @@ class Window(Adw.ApplicationWindow):
         while (child := self.disk_box.get_first_child()):
             self.disk_box.remove(child)
         seen = set()
-        for mount, title in (('/', 'Диск'), (HOME, 'Домашний диск')):
+        for mount, title in (('/', tr('Диск')), (HOME, tr('Домашний диск'))):
             try:
                 st = os.statvfs(mount)
                 dev = os.stat(mount).st_dev
@@ -814,16 +943,16 @@ class Window(Adw.ApplicationWindow):
             used = (st.f_blocks - st.f_bfree) * st.f_frsize
             free = st.f_bavail * st.f_frsize
             frac = used / total
-            name = 'Диск' if len(seen) == 1 else title
+            name = tr('Диск') if len(seen) == 1 else title
             bar = Gtk.LevelBar(value=frac, width_request=120, valign=Gtk.Align.CENTER)
             bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_LOW, 0.75)
             bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_HIGH, 0.9)
             bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_FULL, 1.0)
-            lbl = Gtk.Label(label=f'{name}: занято {human_size(used)} из {human_size(total)}  •  '
-                                  f'свободно {human_size(free)}')
+            lbl = Gtk.Label(label=tr('{name}: занято {used} из {total}  •  свободно {free}', name=name,
+                                     used=human_size(used), total=human_size(total), free=human_size(free)))
             if frac > 0.9:
                 lbl.add_css_class('error')
-            box = Gtk.Box(spacing=8, tooltip_text=f'{mount}: занято {frac:.0%}')
+            box = Gtk.Box(spacing=8, tooltip_text=tr('{mount}: занято {pct}', mount=mount, pct=f'{frac:.0%}'))
             box.append(lbl)
             box.append(bar)
             self.disk_box.append(box)
@@ -833,7 +962,7 @@ class Window(Adw.ApplicationWindow):
             self.stack.set_visible_child_name('list' if self.filter_model.get_n_items() else 'empty')
         n = self.filter_model.get_n_items()
         total = sum(max(self.filter_model.get_item(i).size, 0) for i in range(n))
-        self.status.set_label(f'Показано: {n}   •   Занимают: {human_size(total)}')
+        self.status.set_label(tr('Показано: {n}   •   Занимают: {size}', n=n, size=human_size(total)))
 
     def protected_locked(self):
         return not self.allow.get_state().get_boolean()
@@ -843,20 +972,20 @@ class Window(Adw.ApplicationWindow):
         tip = None
         ok = bool(item and item.removable)
         if item and not item.removable:
-            tip = 'Программа установлена вне домашней папки и не через пакет — удалить отсюда нельзя'
+            tip = tr('Программа установлена вне домашней папки и не через пакет — удалить отсюда нельзя')
         elif item and item.level == 'protected' and self.protected_locked():
-            ok, tip = False, ('Защищённый компонент: от него зависит работа системы. '
-                              'Разблокировать можно в меню ☰ (опасно).')
+            ok, tip = False, tr('Защищённый компонент: от него зависит работа системы. '
+                                'Разблокировать можно в меню ☰ (опасно).')
         self.remove_btn.set_sensitive(ok)
         name = item.name if item else ''
-        self.remove_btn.set_label(f'Удалить «{name[:30]}»' if item else 'Удалить')
+        self.remove_btn.set_label(tr('Удалить «{name}»', name=name[:30]) if item else tr('Удалить'))
         self.remove_btn.set_tooltip_text(tip)
 
     def on_allow(self, action, value):
         action.set_state(value)
         self.update_buttons()
         if value.get_boolean():
-            self.toasts.add_toast(Adw.Toast(title='Удаление защищённых пакетов разрешено. Будьте осторожны!'))
+            self.toasts.add_toast(Adw.Toast(title=tr('Удаление защищённых пакетов разрешено. Будьте осторожны!')))
 
     def on_key(self, _c, keyval, _code, _state):
         if keyval == 0xffff and self.remove_btn.get_sensitive():  # Delete
@@ -874,14 +1003,14 @@ class Window(Adw.ApplicationWindow):
         elif item.source in ('local', 'lutris'):
             self.confirm_local(item)
         elif item.source == 'snap':
-            self.confirm(item, self.level_warning(item) + f'Будет удалён snap-пакет «{item.pkg}».',
+            self.confirm(item, self.level_warning(item) + tr('Будет удалён snap-пакет «{pkg}».', pkg=item.pkg),
                          lambda _purge: ['pkexec', 'snap', 'remove', item.pkg])
         else:
             inst = '--user' if item.installation == 'user' else '--system'
-            self.confirm(item, self.level_warning(item) + f'Будет удалён flatpak «{item.pkg}».',
+            self.confirm(item, self.level_warning(item) + tr('Будет удалён flatpak «{pkg}».', pkg=item.pkg),
                          lambda purge: ['flatpak', 'uninstall', '-y', '--noninteractive', inst,
                                         *(['--delete-data'] if purge else []), item.pkg],
-                         purge_label='Удалить также данные приложения')
+                         purge_label=tr('Удалить также данные приложения'))
 
     def confirm_apt(self, item):
         def work():
@@ -898,34 +1027,34 @@ class Window(Adw.ApplicationWindow):
 
     def show_apt_confirm(self, item, removed, errors, prio):
         if not removed:
-            self.toasts.add_toast(Adw.Toast(title='Не удалось подготовить удаление: ' +
-                                            (errors[0] if errors else 'нечего удалять')))
+            self.toasts.add_toast(Adw.Toast(title=tr('Не удалось подготовить удаление: {err}',
+                                                     err=errors[0] if errors else tr('нечего удалять'))))
             return
         critical = [p for p in removed if self.levels.get(p.split(':')[0]) == 'protected']
         system = [p for p in removed if self.levels.get(p.split(':')[0]) == 'system']
         if critical and self.protected_locked():
             dlg = Adw.AlertDialog(
-                heading='Удаление заблокировано',
-                body=(f'Вместе с «{item.name}» будут удалены защищённые системные пакеты '
-                      f'({len(critical)}), без которых Ubuntu может не загрузиться или потерять '
-                      'рабочий стол:\n\n' + ', '.join(critical[:15]) + (' …' if len(critical) > 15 else '') +
-                      '\n\nЕсли вы точно знаете, что делаете, включите в меню ☰ '
-                      '«Разрешить удаление защищённых».'))
-            dlg.add_response('ok', 'Понятно')
+                heading=tr('Удаление заблокировано'),
+                body=tr('Вместе с «{name}» будут удалены защищённые системные пакеты ({n}), без которых Ubuntu '
+                        'может не загрузиться или потерять рабочий стол:\n\n{list}\n\nЕсли вы точно знаете, '
+                        'что делаете, включите в меню ☰ «Разрешить удаление защищённых».',
+                        name=item.name, n=len(critical),
+                        list=', '.join(critical[:15]) + (' …' if len(critical) > 15 else '')))
+            dlg.add_response('ok', tr('Понятно'))
             dlg.present(self)
             return
-        body = f'Будут удалены пакеты ({len(removed)}):'
+        body = tr('Будут удалены пакеты ({n}):', n=len(removed))
         if critical:
-            body = ('⚠ ОПАСНО: будут удалены защищённые системные пакеты (' + ', '.join(critical[:5]) +
-                    (' …' if len(critical) > 5 else '') + '). Система может перестать работать!\n\n' + body)
+            body = tr('⚠ ОПАСНО: будут удалены защищённые системные пакеты ({list}). Система может перестать '
+                      'работать!\n\n', list=', '.join(critical[:5]) + (' …' if len(critical) > 5 else '')) + body
         elif system:
-            body = ('Внимание: будут удалены компоненты стандартной установки Ubuntu (' +
-                    ', '.join(system[:5]) + (' …' if len(system) > 5 else '') + ').\n\n' + body)
+            body = tr('Внимание: будут удалены компоненты стандартной установки Ubuntu ({list}).\n\n',
+                      list=', '.join(system[:5]) + (' …' if len(system) > 5 else '')) + body
         self.confirm(item, body,
                      lambda purge: ['pkexec', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get',
                                     'purge' if purge else 'remove', '-y', item.pkg],
                      details='\n'.join(removed),
-                     purge_label='Удалить также настройки (purge)')
+                     purge_label=tr('Удалить также настройки (purge)'))
 
     def confirm_local(self, item):
         def work():
@@ -938,23 +1067,23 @@ class Window(Adw.ApplicationWindow):
 
     def show_local_confirm(self, item, entries, lutris_running):
         if not entries:
-            self.toasts.add_toast(Adw.Toast(title='Не нашёл файлов программы для удаления'))
+            self.toasts.add_toast(Adw.Toast(title=tr('Не нашёл файлов программы для удаления')))
             return
-        body = ('Игра установлена через Lutris.' if item.source == 'lutris' else
-                'Программа установлена вручную, не через пакетный менеджер.')
-        body += ' Будут удалены отмеченные пункты (без возможности восстановления):'
+        body = tr('Игра установлена через Lutris.' if item.source == 'lutris' else
+                  'Программа установлена вручную, не через пакетный менеджер.')
+        body += tr(' Будут удалены отмеченные пункты (без возможности восстановления):')
         if lutris_running:
-            body = '⚠ Lutris сейчас запущен — закройте его перед удалением.\n\n' + body
-        dlg = Adw.AlertDialog(heading=f'Удалить «{item.name}»?', body=body)
-        dlg.add_response('cancel', 'Отмена')
-        dlg.add_response('remove', 'Удалить')
+            body = tr('⚠ Lutris сейчас запущен — закройте его перед удалением.\n\n') + body
+        dlg = Adw.AlertDialog(heading=tr('Удалить «{name}»?', name=item.name), body=body)
+        dlg.add_response('cancel', tr('Отмена'))
+        dlg.add_response('remove', tr('Удалить'))
         dlg.set_response_appearance('remove', Adw.ResponseAppearance.DESTRUCTIVE)
         dlg.set_default_response('cancel')
         dlg.set_close_response('cancel')
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         checks = []
-        for group, title in (('program', 'Программа'), ('data', 'Данные и настройки (оставьте, если планируете переустановить)')):
+        for group, title in (('program', tr('Программа')), ('data', tr('Данные и настройки (оставьте, если планируете переустановить)'))):
             group_entries = [e for e in entries if e['group'] == group]
             if not group_entries:
                 continue
@@ -965,10 +1094,11 @@ class Window(Adw.ApplicationWindow):
                     path = os.path.dirname(os.path.dirname(path)) + '/…'
                 size = f'  ({human_size(e["size"])})' if e['size'] >= 0 else ''
                 cb = Gtk.CheckButton(active=e['checked'])
+                label = tr('Значки ({n} шт.)', n=e['count']) if e.get('count') else tr(e['label'])
                 lbl = Gtk.Label(xalign=0, wrap=True, wrap_mode=2, use_markup=True,
-                                label=f'{GLib.markup_escape_text(e["label"])}{size}\n'
+                                label=f'{GLib.markup_escape_text(label)}{size}\n'
                                       f'<span size="small" alpha="65%">{GLib.markup_escape_text(path)}</span>'
-                                      if path else GLib.markup_escape_text(e['label']))
+                                      if path else GLib.markup_escape_text(label))
                 cb.set_child(lbl)
                 box.append(cb)
                 checks.append((cb, e))
@@ -984,15 +1114,15 @@ class Window(Adw.ApplicationWindow):
 
     def level_warning(self, item):
         if item.level == 'protected':
-            return '⚠ ОПАСНО: это защищённый системный компонент. Система может перестать работать!\n\n'
+            return tr('⚠ ОПАСНО: это защищённый системный компонент. Система может перестать работать!\n\n')
         if item.level == 'system':
-            return 'Внимание: это часть стандартной установки системы.\n\n'
+            return tr('Внимание: это часть стандартной установки системы.\n\n')
         return ''
 
     def confirm(self, item, body, make_cmd, details=None, purge_label=None):
-        dlg = Adw.AlertDialog(heading=f'Удалить «{item.name}»?', body=body)
-        dlg.add_response('cancel', 'Отмена')
-        dlg.add_response('remove', 'Удалить')
+        dlg = Adw.AlertDialog(heading=tr('Удалить «{name}»?', name=item.name), body=body)
+        dlg.add_response('cancel', tr('Отмена'))
+        dlg.add_response('remove', tr('Удалить'))
         dlg.set_response_appearance('remove', Adw.ResponseAppearance.DESTRUCTIVE)
         dlg.set_default_response('cancel')
         dlg.set_close_response('cancel')
@@ -1019,11 +1149,11 @@ class Window(Adw.ApplicationWindow):
         spinner = make_spinner(16)
         header = Adw.HeaderBar(show_end_title_buttons=False)
         header.pack_start(spinner)
-        close = Gtk.Button(label='Закрыть', sensitive=False)
+        close = Gtk.Button(label=tr('Закрыть'), sensitive=False)
         header.pack_end(close)
         tbv = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=tv, vexpand=True))
         tbv.add_top_bar(header)
-        dlg = Adw.Dialog(title=f'Удаление «{item.name}»', content_width=650, content_height=420,
+        dlg = Adw.Dialog(title=tr('Удаление «{name}»', name=item.name), content_width=650, content_height=420,
                          child=tbv, can_close=False)
         close.connect('clicked', lambda *_: dlg.force_close())
         dlg.present(self)
@@ -1037,13 +1167,13 @@ class Window(Adw.ApplicationWindow):
             close.set_sensitive(True)
             dlg.set_can_close(True)
             if code == 0:
-                append('\n✔ Готово.\n')
-                self.toasts.add_toast(Adw.Toast(title=f'«{item.name}» удалено'))
+                append(tr('\n✔ Готово.\n'))
+                self.toasts.add_toast(Adw.Toast(title=tr('«{name}» удалено', name=item.name)))
                 self.reload()
             elif code in (126, 127) and cmd and cmd[0] == 'pkexec':
-                append('\nОтменено: пароль не введён.\n')
+                append(tr('\nОтменено: пароль не введён.\n'))
             else:
-                append(f'\n✘ Ошибка (код {code}).\n')
+                append(tr('\n✘ Ошибка (код {code}).\n', code=code))
 
         def log(text):
             GLib.idle_add(append, text)
@@ -1081,6 +1211,25 @@ class App(Adw.Application):
     def do_startup(self):
         Adw.Application.do_startup(self)
         Gtk.Window.set_default_icon_name(APP_ID)
+        choice = load_settings().get('language', 'auto')
+        action = Gio.SimpleAction.new_stateful('language', GLib.VariantType.new('s'), GLib.Variant('s', choice))
+        action.connect('change-state', self.on_language)
+        self.add_action(action)
+
+    def on_language(self, action, value):
+        action.set_state(value)
+        settings = load_settings()
+        settings['language'] = value.get_string()
+        try:
+            save_settings(settings)
+        except OSError:
+            pass
+        apply_language(value.get_string())
+        old = self.props.active_window
+        win = Window(self)
+        win.present()
+        if old:
+            old.destroy()
 
     def do_activate(self):
         (self.props.active_window or Window(self)).present()
@@ -1088,7 +1237,7 @@ class App(Adw.Application):
 
 def main():
     if (Adw.get_major_version(), Adw.get_minor_version()) < (1, 5):
-        print(f'Нужна libadwaita 1.5 или новее (Ubuntu 24.04+), установлена '
+        print(f'libadwaita 1.5+ is required (Ubuntu 24.04+), found '
               f'{Adw.get_major_version()}.{Adw.get_minor_version()}', file=sys.stderr)
         return 1
     return App().run(sys.argv)

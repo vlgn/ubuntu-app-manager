@@ -1,11 +1,12 @@
 [Desktop Entry]
 Type=Application
-Name=Установленные программы
-Name[en]=Installed Apps
-Comment=Просмотр и удаление установленных приложений
-Comment[en]=View and uninstall installed applications
+Name=Installed Apps
+Name[ru]=Установленные программы
+Comment=View and uninstall installed applications
+Comment[ru]=Просмотр и удаление установленных приложений
 Exec=@EXEC@
 Icon=io.github.vlgn.AppManager
 Categories=System;Settings;PackageManager;GTK;
-Keywords=uninstall;remove;apps;packages;удалить;программы;пакеты;
+Keywords=uninstall;remove;apps;packages;
+Keywords[ru]=uninstall;remove;apps;packages;удалить;программы;пакеты;
 StartupNotify=true

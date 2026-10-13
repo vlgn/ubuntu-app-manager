@@ -1,36 +1,38 @@
 <img src="io.github.vlgn.AppManager.svg" width="96" align="right" alt="">
 
-# Установленные программы
+# Installed Apps
 
-Простой менеджер программ для Ubuntu — как «Установка и удаление программ» в Windows.
-Показывает все установленные приложения в одном списке и удаляет выбранное в пару кликов.
+**English** | [Русский](README.ru.md)
 
-*A simple "Add/Remove Programs" for Ubuntu (GTK4 + libadwaita). UI is in Russian.*
+A simple app manager for Ubuntu — like **"Add or Remove Programs" in Windows**.
+See everything installed on your computer in one list and uninstall what you don't need in a couple of clicks.
 
-## Возможности
+## Features
 
-- **Все источники в одном списке:** APT (deb), Snap, Flatpak, игры Lutris и программы,
-  установленные вручную в домашнюю папку (AppImage, скрипты-установщики и т.п.).
-- **Иконка, версия и размер** каждой программы; поиск, фильтры и сортировка по колонкам.
-- **Защита системы.** Каждая программа помечена:
-  | Тип | Что значит |
+- **Every source in one list:** APT (deb), Snap, Flatpak, Lutris games, and apps installed manually
+  into your home folder (AppImages, script installers, etc.).
+- **Icon, version and size** of every app; search, filters and sortable columns.
+- **Disk usage** at the bottom: how much space is used and free.
+- **Keeps your system safe.** Every app is labeled:
+  | Type | Meaning |
   |---|---|
-  | 🔒 Защищено | Нужно для работы системы (ядро, рабочий стол, Файлы, Настройки…). Удаление заблокировано |
-  | ⚙ Системное | Часть стандартной установки Ubuntu. Удалить можно, с предупреждением |
-  | 👤 Пользовательское | Установлено вами — удаляйте спокойно |
+  | 🔒 Protected | Required by the system (kernel, desktop, Files, Settings…). Removal is blocked |
+  | ⚙ System | Part of the standard Ubuntu install. Can be removed, with a warning |
+  | 👤 Regular | Installed by you — safe to remove |
 
-  Перед удалением deb-пакета приложение проверяет, **что ещё удалится вместе с ним**, и блокирует
-  удаление, если среди зависимостей есть защищённые пакеты. Блокировку можно снять в меню ☰.
-- **Программы, установленные вручную:** находит папку программы, ярлык, значки, фоновые службы
-  systemd и автозапуск; показывает список с размерами, а данные и настройки по умолчанию оставляет.
-- Вкладка **«Все пакеты»** — полный список пакетов системы с фильтром «только установленные вручную».
+  Before removing a deb package, the app checks **what else would be removed along with it** and blocks
+  the removal if any protected package is affected. You can unlock this in the ☰ menu if you really need to.
+- **Manually installed apps:** finds the program folder, menu shortcut, icons, systemd background services
+  and autostart entries, and shows the list with sizes before deleting. Your data and settings are kept by default.
+- **"All packages" tab** — every package on the system, with a "manually installed only" filter.
+- **English and Russian UI** — follows your system language; switch it in ☰ → Language.
 
-## Требования
+## Requirements
 
-- Ubuntu 24.04 или новее (или другой дистрибутив на базе Debian с libadwaita 1.5+)
-- Python 3, GTK 4, libadwaita — установщик поставит их сам при необходимости
+- Ubuntu 24.04 or newer (or another Debian-based distro with libadwaita 1.5+)
+- Python 3, GTK 4, libadwaita — the installer adds them if they are missing
 
-## Установка
+## Install
 
 ```bash
 git clone https://github.com/vlgn/ubuntu-app-manager.git
@@ -38,23 +40,24 @@ cd ubuntu-app-manager
 ./install.sh
 ```
 
-После установки ищите **«Установленные программы»** в меню приложений или запустите `app-manager`.
+Then open **Installed Apps** from the app menu, or run `app-manager`.
+The app is installed for your user only (into `~/.local`); only the dependencies need `sudo`.
 
-Удаление самого приложения:
+To remove the app itself:
 
 ```bash
 ./uninstall.sh
 ```
 
-## Как это работает
+## How it works
 
-- Списки берутся из `dpkg-query`, `snap list`, `flatpak list` и `.desktop`-файлов меню.
-- Удаление: `apt-get remove` / `snap remove` (через `pkexec` — система спросит пароль),
-  `flatpak uninstall`, для ручных программ и Lutris — удаление файлов в домашней папке.
-- Ничего не удаляется без окна подтверждения со списком того, что будет удалено.
-- Приложение никогда не удаляет общие папки (`~/Documents`, `~/.config`, `~/.local/share` и т.п.)
-  целиком и ничего вне домашней папки, кроме как через пакетный менеджер.
+- Lists come from `dpkg-query`, `snap list`, `flatpak list` and the `.desktop` files of the app menu.
+- Removal uses `apt-get remove` / `snap remove` (via `pkexec` — the system asks for your password),
+  `flatpak uninstall`, and for manual apps and Lutris games — deleting their files in your home folder.
+- Nothing is removed without a confirmation dialog listing exactly what will be deleted.
+- The app never deletes shared folders (`~/Documents`, `~/.config`, `~/.local/share`, …) as a whole,
+  and never touches anything outside your home folder except through the package manager.
 
-## Лицензия
+## License
 
 MIT
