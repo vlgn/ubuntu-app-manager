@@ -11,11 +11,13 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
+from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Adw, Gio, GLib, GObject, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 try:
     gi.require_version('GioUnix', '2.0')
     from gi.repository import GioUnix
@@ -97,7 +99,10 @@ EN = {
     'Закрыть': 'Close', 'Удаление «{name}»': 'Uninstalling “{name}”', '\n✔ Готово.\n': '\n✔ Done.\n',
     '«{name}» удалено': '“{name}” uninstalled', '\nОтменено: пароль не введён.\n': '\nCancelled: no password entered.\n',
     '\n✘ Ошибка (код {code}).\n': '\n✘ Failed (code {code}).\n',
-    'Язык изменён': 'Language changed',
+    'также используется: {names}': 'also used by: {names}',
+    'Также будут установлены или обновлены пакеты ({n}): {list}\n\n':
+        'These packages will also be installed or upgraded ({n}): {list}\n\n',
+    'Принудительно завершён процесс {pid}\n': 'Killed process {pid}\n',
 }
 
 
@@ -169,9 +174,9 @@ PROTECTED_ROOTS = {
 SYSTEM_ROOTS = {'ubuntu-desktop', 'ubuntu-desktop-minimal', 'ubuntu-standard', 'ubuntu-minimal',
                 'ubuntu-server', 'ubuntu-restricted-addons', 'ubuntu-desktop-bootstrap'}
 PROTECTED_SNAPS = {'snapd'}
-SYSTEM_SNAPS_PREFIX = ('core', 'bare', 'gnome-', 'gtk-common-themes', 'mesa-', 'kf5-', 'kf6-',
-                       'snap-store', 'snapd-desktop-integration', 'firmware-updater',
-                       'desktop-security-center', 'prompting-client', 'firefox', 'thunderbird')
+SYSTEM_SNAPS_RE = re.compile(r'^(core\d*|bare|gnome-[\d-]+(-sdk)?|kf[56]-core\d+|mesa-[\w-]+|gtk2?-common-themes|'
+                             r'snap-store|snapd-desktop-integration|firmware-updater|desktop-security-center|'
+                             r'prompting-client|firefox|thunderbird)$')
 
 
 def run(cmd):
@@ -274,13 +279,14 @@ def classify_debs():
 def snap_level(name, is_base):
     if name in PROTECTED_SNAPS:
         return 'protected'
-    return 'system' if is_base or name.startswith(SYSTEM_SNAPS_PREFIX) else 'user'
+    return 'system' if is_base or SYSTEM_SNAPS_RE.match(name) else 'user'
 
 
 # ---------- программы, установленные не через пакетный менеджер
 
 HOME = os.path.expanduser('~')
 LUTRIS_DIR = os.path.join(HOME, '.local/share/lutris')
+LUTRIS_FLATPAK_DIR = os.path.join(HOME, '.var/app/net.lutris.Lutris/data/lutris')
 INTERPRETERS = re.compile(r'^(python[\d.]*|bash|sh|dash|zsh|perl|ruby|node|java|wine\d*|mono|gjs|electron\d*)$')
 # Общие папки, которые никогда не считаются «папкой программы» и не удаляются целиком
 COMMON_DIRS = {
@@ -288,7 +294,15 @@ COMMON_DIRS = {
     '.cache', '.var', '.var/app', 'snap', 'bin', 'opt', 'Applications', 'Apps', 'AppImages', 'Programs',
     'apps', 'Games', '.local/share/applications', '.local/share/icons', '.config/autostart',
     '.config/systemd', '.config/systemd/user', '.local/share/lutris',
+    # общие папки инструментов и пользовательских проектов — целиком никогда не удаляются
+    '.cargo', '.cargo/bin', '.rustup', 'go', 'go/bin', '.go', '.npm', '.npm-global', '.nvm', '.pyenv', '.rbenv',
+    '.sdkman', '.deno', '.bun', '.conda', '.wine', '.virtualenvs', '.local/share/virtualenvs',
+    '.local/share/pipx', '.local/share/pipx/venvs', '.local/share/uv', '.local/share/uv/tools',
+    '.local/share/JetBrains', '.local/share/Steam', '.steam', '.local/share/flatpak',
+    'Projects', 'projects', 'code', 'Code', 'dev', 'src', 'git', 'repos', 'workspace', 'Development',
 }
+GENERIC_NAMES = {'app', 'apps', 'bin', 'run', 'start', 'launch', 'launcher', 'main', 'apprun', 'desktop',
+                 'client', 'python', 'python3', 'program', 'programs'}
 for _d in ('DIRECTORY_DESKTOP', 'DIRECTORY_DOCUMENTS', 'DIRECTORY_DOWNLOAD', 'DIRECTORY_MUSIC',
            'DIRECTORY_PICTURES', 'DIRECTORY_PUBLIC_SHARE', 'DIRECTORY_TEMPLATES', 'DIRECTORY_VIDEOS'):
     _p = GLib.get_user_special_dir(getattr(GLib.UserDirectory, _d))
@@ -306,14 +320,35 @@ def safe_to_delete(path):
     return in_home(path) and os.path.relpath(path, HOME) not in COMMON_DIRS
 
 
-def install_root(path):
-    """Самая верхняя «папка программы» в $HOME, содержащая path (или None, если файл лежит в общей папке)."""
+def norm_name(text):
+    return re.sub(r'[\W_]+', '', text.lower())
+
+
+def app_keys(names):
+    """Нормализованные варианты названий программы: «Foo Bar», foo-bar.sh, org.example.FooBar → foobar."""
+    keys = set()
+    for n in names:
+        if not n:
+            continue
+        for part in (n, os.path.splitext(n)[0], n.split('.')[-1] if '.' in n else n):
+            k = norm_name(part)
+            if len(k) >= 3 and k not in GENERIC_NAMES:
+                keys.add(k)
+    return keys
+
+
+def install_root(path, keys):
+    """Папка программы в $HOME, содержащая path: самая верхняя папка, чьё имя совпадает с названием
+    программы (общие папки пропускаются). None — если такой нет, тогда удаляется только сам файл."""
     if not in_home(path):
         return None
     parts = os.path.relpath(os.path.abspath(path), HOME).split('/')
     for i in range(1, len(parts)):
         cand = '/'.join(parts[:i])
-        if cand not in COMMON_DIRS:
+        if cand in COMMON_DIRS:
+            continue
+        d = norm_name(parts[i - 1])
+        if len(d) >= 3 and d not in GENERIC_NAMES and any(k in d or d in k for k in keys):
             return os.path.join(HOME, cand)
     return None
 
@@ -361,23 +396,26 @@ def classify_local(a, fn, name, desc, icon, deb, deb_level):
     cmd = a.get_commandline() or ''
     m = re.search(r'lutris:rungameid/(\d+)', cmd)
     if m:
+        flatpak = 'net.lutris.Lutris' in cmd or re.search(r'\bflatpak\b', cmd)
         item = Pkg(name, f'lutris #{m.group(1)}', 'lutris', summary=desc or tr('Игра Lutris'), icon=icon)
-        item.local = dict(kind='lutris', game_id=int(m.group(1)), desktop=fn, icon_name=a.get_string('Icon'))
+        item.local = dict(kind='lutris', game_id=int(m.group(1)), desktop=fn, icon_name=a.get_string('Icon'),
+                          lutris_dir=LUTRIS_FLATPAK_DIR if flatpak else LUTRIS_DIR)
         return item
 
     exe = exec_target(a)
+    real = os.path.realpath(exe) if exe and os.path.isabs(exe) else exe
     owner = system_desktop_owner(os.path.basename(fn)) if in_home(fn) else None
-    if not owner and exe and os.path.isabs(exe) and not in_home(exe):
-        owner = dpkg_owner(os.path.realpath(exe))
+    if not owner and real and os.path.isabs(real) and not in_home(real):
+        owner = dpkg_owner(real)
     if owner and owner in deb:
         info = deb[owner]
         item = Pkg(name, owner, 'apt', info['version'], info['size'], desc or info['summary'], icon,
                    level=deb_level(owner))
-        if in_home(fn):
-            item.extra_files = [fn]
+        # копия ярлыка и симлинк-запускалка в $HOME после удаления пакета станут мусором
+        item.extra_files = [p for p in (fn, exe) if p and in_home(p) and (p == fn or os.path.islink(p))]
         return item
 
-    if exe and in_home(exe) and os.path.exists(exe):
+    if exe and in_home(exe) and in_home(real) and os.path.exists(exe):
         item = Pkg(name, os.path.basename(fn), 'local', summary=desc or exe, icon=icon)
         item.local = dict(kind='home', exe=exe, desktop=fn, icon_name=a.get_string('Icon'),
                           names={name, os.path.basename(fn)[:-len('.desktop')], os.path.basename(exe),
@@ -412,7 +450,7 @@ def references(path, needles):
             text = f.read(200_000)
     except OSError:
         return False
-    return any(n and n in text for n in needles)
+    return any(n and re.search(re.escape(n) + r'(?=$|[/\s"\';:])', text, re.M) for n in needles)
 
 
 def plan_local(item):
@@ -420,43 +458,52 @@ def plan_local(item):
     L = item.local
     entries = []
 
-    def add(path, label, group='program', checked=True, kind='path'):
+    def add(path, label, group='program', checked=True, kind='path', note=''):
         if kind == 'path':
             if not path or not os.path.lexists(path) or not safe_to_delete(path):
                 return
             if any(e['kind'] == 'path' and (path == e['path'] or path.startswith(e['path'] + '/')) for e in entries):
                 return
-        entries.append(dict(kind=kind, path=path, label=label, group=group, checked=checked))
+        entries.append(dict(kind=kind, path=path, label=label, group=group, checked=checked, note=note))
 
     if L['kind'] == 'lutris':
+        ldir = L['lutris_dir']
         try:
-            con = sqlite3.connect(os.path.join(LUTRIS_DIR, 'pga.db'))
+            con = lutris_connect(ldir)
             row = con.execute('select name, slug, directory, configpath from games where id=?',
                               (L['game_id'],)).fetchone()
+            others = con.execute("select name, directory from games where id != ? and directory != ''",
+                                 (L['game_id'],)).fetchall() if row else []
             con.close()
         except sqlite3.Error:
-            row = None
+            row, others = None, []
         if row:
             _name, slug, directory, configpath = row
             if directory and safe_to_delete(directory):
-                add(directory, 'Файлы игры и Wine-префикс')
+                d = os.path.abspath(directory)
+                # другие игры в той же папке (общий Wine-префикс, папка с ROM-ами) — не удалять по умолчанию
+                shared = [n for n, od in others
+                          if od and (os.path.abspath(od) == d or os.path.abspath(od).startswith(d + '/'))]
+                add(directory, 'Файлы игры и Wine-префикс', checked=not shared, note=', '.join(shared[:3]))
             if configpath:
-                add(os.path.join(LUTRIS_DIR, 'games', configpath + '.yml'), 'Настройки игры в Lutris')
+                add(os.path.join(ldir, 'games', configpath + '.yml'), 'Настройки игры в Lutris')
             for sub in ('banners', 'coverart'):
-                for f in glob.glob(os.path.join(LUTRIS_DIR, sub, glob.escape(slug) + '.*')):
+                for f in glob.glob(os.path.join(ldir, sub, glob.escape(slug) + '.*')):
                     add(f, 'Обложка')
             entries.append(dict(kind='lutris-db', path=str(L['game_id']), label='Запись в библиотеке Lutris',
-                                group='program', checked=True))
+                                group='program', checked=True, note='', lutris_dir=ldir))
         add(L['desktop'], 'Ярлык в меню')
         for f in icon_files(L['icon_name']):
             add(f, 'Значок')
         return merge_icons(entries)
 
     exe = L['exe']
+    keys = app_keys(L['names'])
     roots = set()
-    r = install_root(exe)
-    if r:
-        roots.add(r)
+    for p in (exe, os.path.realpath(exe)):
+        r = install_root(p, keys)
+        if r:
+            roots.add(r)
     # Скрипт-запускалка: ищем исполняемые файлы в $HOME, на которые он ссылается
     try:
         if os.path.getsize(exe) < 64_000:
@@ -465,7 +512,7 @@ def plan_local(item):
             for ref in re.findall(r'(?:\$HOME|~|' + re.escape(HOME) + r')(/[^\s"\'`;|&<>]+)', text):
                 ref = HOME + ref
                 if os.path.isfile(ref) and os.access(ref, os.X_OK):
-                    rr = install_root(ref)
+                    rr = install_root(ref, keys)
                     if rr:
                         roots.add(rr)
     except OSError:
@@ -481,7 +528,7 @@ def plan_local(item):
     for unit in glob.glob(os.path.join(HOME, '.config/systemd/user/*.service')):
         if os.path.isfile(unit) and not os.path.islink(unit) and references(unit, needles):
             entries.append(dict(kind='unit', path=unit, label='Фоновая служба (будет остановлена)',
-                                group='program', checked=True))
+                                group='program', checked=True, note=''))
     for f in glob.glob(os.path.join(HOME, '.config/autostart/*.desktop')):
         if references(f, needles):
             add(f, 'Автозапуск')
@@ -496,6 +543,16 @@ def plan_local(item):
         if entry.startswith('.') and entry[1:].lower() in names:
             add(os.path.join(HOME, entry), 'Данные и настройки', group='data', checked=False)
     return merge_icons(entries)
+
+
+def lutris_connect(ldir, write=False):
+    """База игр Lutris. Только чтение, если не нужна запись; несуществующий файл не создаётся."""
+    path = os.path.join(ldir, 'pga.db')
+    if not os.path.isfile(path):
+        raise sqlite3.OperationalError(f'{path} not found')
+    if write:
+        return sqlite3.connect(path)
+    return sqlite3.connect(Path(path).as_uri() + '?mode=ro', uri=True)
 
 
 def merge_icons(entries):
@@ -519,8 +576,20 @@ def entry_size(e):
     return sum(max(path_size(p), 0) for p in entry_paths(e))
 
 
+def process_alive(pid):
+    try:
+        with open(f'/proc/{pid}/stat') as f:
+            return f.read().rsplit(')', 1)[1].split()[0] != 'Z'
+    except (OSError, IndexError):
+        return False
+
+
 def kill_processes(roots, log):
+    """Завершает процессы, запущенные из удаляемых путей, и ждёт их выхода (SIGTERM, затем SIGKILL)."""
+    if not roots:
+        return
     me = os.getpid()
+    killed = []
     for pid in filter(str.isdigit, os.listdir('/proc')):
         if int(pid) == me:
             continue
@@ -534,9 +603,22 @@ def kill_processes(roots, log):
         if any(p == r or p.startswith(r + '/') for p in paths for r in roots):
             try:
                 os.kill(int(pid), signal.SIGTERM)
+                killed.append(int(pid))
                 log(tr('Завершён процесс {pid}: {name}\n', pid=pid, name=paths[1] or exe))
             except OSError:
                 pass
+    deadline = time.monotonic() + 5
+    while killed and time.monotonic() < deadline:
+        time.sleep(0.2)
+        killed = [p for p in killed if process_alive(p)]
+    for pid in killed:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            log(tr('Принудительно завершён процесс {pid}\n', pid=pid))
+        except OSError:
+            pass
+    if killed:
+        time.sleep(0.5)
 
 
 def remove_local(entries, log):
@@ -553,7 +635,7 @@ def remove_local(entries, log):
     for e in entries:
         if e['kind'] == 'lutris-db':
             try:
-                con = sqlite3.connect(os.path.join(LUTRIS_DIR, 'pga.db'))
+                con = lutris_connect(e['lutris_dir'], write=True)
                 con.execute('delete from games where id=?', (int(e['path']),))
                 con.commit()
                 con.close()
@@ -698,6 +780,8 @@ class Window(Adw.ApplicationWindow):
         self.pkgs_store = Gio.ListStore(item_type=Pkg)
         self.mode = 'apps'
         self.levels = {}
+        self.alive = True   # окно могут закрыть (смена языка), пока работают фоновые потоки
+        self.connect('destroy', lambda *_: setattr(self, 'alive', False))
         self.allow = Gio.SimpleAction.new_stateful('allow-protected', None, GLib.Variant('b', False))
         self.allow.connect('change-state', self.on_allow)
         self.add_action(self.allow)
@@ -901,12 +985,16 @@ class Window(Adw.ApplicationWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def refresh_rows(self, apps):
+        if not self.alive:
+            return
         for item in apps:
             if item.local:
                 item.emit('changed')
         self.update_status()
 
     def loaded(self, apps, pkgs):
+        if not self.alive:
+            return
         self.apps_store.splice(0, self.apps_store.get_n_items(), apps)
         self.pkgs_store.splice(0, self.pkgs_store.get_n_items(), pkgs)
         self.levels = {p.pkg.split(':')[0]: p.level for p in pkgs if p.source == 'apt'}
@@ -958,9 +1046,11 @@ class Window(Adw.ApplicationWindow):
             frac = used / total
             name = tr('Диск') if len(seen) == 1 else title
             bar = Gtk.LevelBar(value=frac, width_request=120, valign=Gtk.Align.CENTER)
-            bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_LOW, 0.75)
-            bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_HIGH, 0.9)
-            bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_FULL, 1.0)
+            # стандартные уровни GTK рассчитаны на «мало — плохо» (как батарея); для диска наоборот
+            for offset in (Gtk.LEVEL_BAR_OFFSET_LOW, Gtk.LEVEL_BAR_OFFSET_HIGH, Gtk.LEVEL_BAR_OFFSET_FULL):
+                bar.remove_offset_value(offset)
+            bar.add_offset_value('disk-ok', 0.9)
+            bar.add_offset_value('disk-full', 1.0)
             lbl = Gtk.Label(label=tr('{name}: занято {used} из {total}  •  свободно {free}', name=name,
                                      used=human_size(used), total=human_size(total), free=human_size(free)))
             if frac > 0.9:
@@ -1019,7 +1109,8 @@ class Window(Adw.ApplicationWindow):
             self.confirm(item, self.level_warning(item) + tr('Будет удалён snap-пакет «{pkg}».', pkg=item.pkg),
                          lambda _purge: ['pkexec', 'snap', 'remove', item.pkg])
         else:
-            inst = '--user' if item.installation == 'user' else '--system'
+            inst = {'user': '--user', 'system': '--system'}.get(item.installation,
+                                                                 f'--installation={item.installation}')
             self.confirm(item, self.level_warning(item) + tr('Будет удалён flatpak «{pkg}».', pkg=item.pkg),
                          lambda purge: ['flatpak', 'uninstall', '-y', '--noninteractive', inst,
                                         *(['--delete-data'] if purge else []), item.pkg],
@@ -1029,16 +1120,14 @@ class Window(Adw.ApplicationWindow):
         def work():
             out = run(['apt-get', '-s', 'remove', item.pkg])
             removed = re.findall(r'^Remv (\S+)', out, re.M)
+            installed = re.findall(r'^Inst (\S+)', out, re.M)
             errors = [l for l in out.splitlines() if l.startswith('E:')]
-            prio = {}
-            if removed:
-                for l in run(['dpkg-query', '-W', '-f=${binary:Package}\t${Priority}\n', *removed]).splitlines():
-                    k, _, v = l.partition('\t')
-                    prio[k] = v
-            GLib.idle_add(self.show_apt_confirm, item, removed, errors, prio)
+            GLib.idle_add(self.show_apt_confirm, item, removed, installed, errors)
         threading.Thread(target=work, daemon=True).start()
 
-    def show_apt_confirm(self, item, removed, errors, prio):
+    def show_apt_confirm(self, item, removed, installed, errors):
+        if not self.alive:
+            return
         if not removed:
             self.toasts.add_toast(Adw.Toast(title=tr('Не удалось подготовить удаление: {err}',
                                                      err=errors[0] if errors else tr('нечего удалять'))))
@@ -1057,6 +1146,9 @@ class Window(Adw.ApplicationWindow):
             dlg.present(self)
             return
         body = tr('Будут удалены пакеты ({n}):', n=len(removed))
+        if installed:
+            body = tr('Также будут установлены или обновлены пакеты ({n}): {list}\n\n', n=len(installed),
+                      list=', '.join(installed[:10]) + (' …' if len(installed) > 10 else '')) + body
         if critical:
             body = tr('⚠ ОПАСНО: будут удалены защищённые системные пакеты ({list}). Система может перестать '
                       'работать!\n\n', list=', '.join(critical[:5]) + (' …' if len(critical) > 5 else '')) + body
@@ -1079,6 +1171,8 @@ class Window(Adw.ApplicationWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def show_local_confirm(self, item, entries, lutris_running):
+        if not self.alive:
+            return
         if not entries:
             self.toasts.add_toast(Adw.Toast(title=tr('Не нашёл файлов программы для удаления')))
             return
@@ -1108,6 +1202,8 @@ class Window(Adw.ApplicationWindow):
                 size = f'  ({human_size(e["size"])})' if e['size'] >= 0 else ''
                 cb = Gtk.CheckButton(active=e['checked'])
                 label = tr('Значки ({n} шт.)', n=e['count']) if e.get('count') else tr(e['label'])
+                if e.get('note'):
+                    label += ' — ' + tr('также используется: {names}', names=e['note'])
                 lbl = Gtk.Label(xalign=0, wrap=True, wrap_mode=2, use_markup=True,
                                 label=f'{GLib.markup_escape_text(label)}{size}\n'
                                       f'<span size="small" alpha="65%">{GLib.markup_escape_text(path)}</span>'
@@ -1159,7 +1255,14 @@ class Window(Adw.ApplicationWindow):
         dlg.connect('response', on_resp)
         dlg.present(self)
 
+    def set_busy(self, busy):
+        """Пока идёт удаление, язык не переключается (окно пересоздаётся и журнал потерялся бы)."""
+        action = self.get_application().lookup_action('language')
+        if action:
+            action.set_enabled(not busy)
+
     def execute(self, item, cmd=None, func=None):
+        self.set_busy(True)
         buf = Gtk.TextBuffer()
         tv = Gtk.TextView(buffer=buf, editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
                           left_margin=8, right_margin=8, top_margin=8, bottom_margin=8)
@@ -1180,17 +1283,20 @@ class Window(Adw.ApplicationWindow):
             tv.scroll_to_mark(buf.get_insert(), 0, False, 0, 0)
 
         def finished(code):
+            self.set_busy(False)
             spinner.set_visible(False)
             close.set_sensitive(True)
             dlg.set_can_close(True)
+            cancelled = code in (126, 127) and cmd and cmd[0] == 'pkexec'
             if code == 0:
                 append(tr('\n✔ Готово.\n'))
                 self.toasts.add_toast(Adw.Toast(title=tr('«{name}» удалено', name=item.name)))
-                self.reload()
-            elif code in (126, 127) and cmd and cmd[0] == 'pkexec':
+            elif cancelled:
                 append(tr('\nОтменено: пароль не введён.\n'))
             else:
                 append(tr('\n✘ Ошибка (код {code}).\n', code=code))
+            if not cancelled:  # даже при ошибке часть могла удалиться
+                self.reload()
 
         def log(text):
             GLib.idle_add(append, text)
@@ -1214,7 +1320,7 @@ class Window(Adw.ApplicationWindow):
                 GLib.idle_add(append, f'{e}\n')
                 code = -1
             if code == 0 and item.extra_files:
-                remove_local([dict(kind='path', path=f, label='Ярлык') for f in item.extra_files], log)
+                remove_local([dict(kind='path', path=f, label='Ярлык', note='') for f in item.extra_files], log)
             GLib.idle_add(finished, code)
         if cmd:
             append('$ ' + ' '.join(cmd) + '\n\n')
@@ -1228,12 +1334,19 @@ class App(Adw.Application):
     def do_startup(self):
         Adw.Application.do_startup(self)
         Gtk.Window.set_default_icon_name(APP_ID)
+        error = 'var(--error-bg-color)' if Adw.get_minor_version() >= 6 else '@error_bg_color'
+        css = Gtk.CssProvider()
+        css.load_from_string(f'levelbar > trough > block.disk-full {{ background-color: {error}; }}')
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         choice = load_settings().get('language', 'auto')
         action = Gio.SimpleAction.new_stateful('language', GLib.VariantType.new('s'), GLib.Variant('s', choice))
         action.connect('change-state', self.on_language)
         self.add_action(action)
 
     def on_language(self, action, value):
+        if value.equal(action.get_state()):
+            return
         action.set_state(value)
         settings = load_settings()
         settings['language'] = value.get_string()

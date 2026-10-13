@@ -11,9 +11,14 @@ if ! command -v dpkg-query >/dev/null 2>&1 || ! command -v apt-get >/dev/null 2>
     exit 1
 fi
 
-if ! python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw" 2>/dev/null; then
-    echo "Installing dependencies: python3-gi gir1.2-gtk-4.0 gir1.2-adw-1"
-    sudo apt-get install -y python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
+NEED=""
+python3 -c "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw" 2>/dev/null \
+    || NEED="python3-gi gir1.2-gtk-4.0 gir1.2-adw-1"
+command -v pkexec >/dev/null 2>&1 || NEED="$NEED pkexec"  # asks for the password when uninstalling
+if [ -n "$NEED" ]; then
+    echo "Installing dependencies: $NEED"
+    # shellcheck disable=SC2086
+    sudo apt-get install -y $NEED
 fi
 
 ADW=$(python3 -c "import gi; gi.require_version('Adw','1'); from gi.repository import Adw; print(Adw.get_minor_version())")
@@ -28,7 +33,18 @@ ln -sf "$DEST/app-manager.py" "$HOME/.local/bin/app-manager"
 rm -f "$APPS/local.appmanager.desktop"  # old shortcut name
 install -Dm644 "$DIR/$APP_ID.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/$APP_ID.svg"
 touch "$HOME/.local/share/icons/hicolor"  # make the shell reload icons
-sed "s|@EXEC@|python3 $DEST/app-manager.py|" "$DIR/$APP_ID.desktop" > "$APPS/$APP_ID.desktop"
+
+# Exec= must be quoted per the desktop entry spec (spaces, quotes, $ or \ in the home path)
+python3 - "$DIR/$APP_ID.desktop" "$APPS/$APP_ID.desktop" "$DEST/app-manager.py" <<'PY'
+import sys
+src, dst, script = sys.argv[1:]
+arg = '"' + ''.join('\\' + c if c in '"`$\\' else c for c in script) + '"'
+arg = arg.replace('\\', '\\\\')  # string-level escaping is applied before the quoting rule
+with open(src) as f:
+    text = f.read()
+with open(dst, 'w') as f:
+    f.write(text.replace('@EXEC@', 'python3 ' + arg))
+PY
 update-desktop-database "$APPS" 2>/dev/null || true
 
 echo "Done! Open \"Installed Apps\" from the app menu or run: app-manager"
