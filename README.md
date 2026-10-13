@@ -1,3 +1,5 @@
+<img src="io.github.vlgn.AppManager.svg" width="96" align="right" alt="">
+
 # Установленные программы
 
 Простой менеджер программ для Ubuntu — как «Установка и удаление программ» в Windows.
