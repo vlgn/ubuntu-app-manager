@@ -103,6 +103,11 @@ EN = {
     'Также будут установлены или обновлены пакеты ({n}): {list}\n\n':
         'These packages will also be installed or upgraded ({n}): {list}\n\n',
     'Принудительно завершён процесс {pid}\n': 'Killed process {pid}\n',
+    'Удаление невозможно': 'Cannot uninstall',
+    'Пакеты удержаны от изменений (apt-mark hold), поэтому apt их не удалит: {list}\n\n'
+    'Чтобы удалить, сначала снимите удержание:\n{cmd}':
+        'These packages are held (apt-mark hold), so apt will not remove them: {list}\n\n'
+        'To uninstall, release the hold first:\n{cmd}',
 }
 
 
@@ -216,6 +221,7 @@ class Pkg(GObject.Object):
         self.icon, self.manual, self.installation = icon, manual, installation
         self.removable, self.level = removable, level
         self.extra_files = []   # локальные копии ярлыков, удаляемые вместе с пакетом
+        self.uses = []          # файлы и папки в $HOME, которые запускает этот пункт меню
         self.local = None       # данные для удаления программ, установленных вручную / через Lutris
 
 
@@ -293,10 +299,19 @@ HOME = os.path.abspath(os.path.expanduser('~'))
 REAL_HOME = os.path.realpath(HOME)  # отличается, если домашняя папка (или /home) — символическая ссылка
 LUTRIS_DIR = os.path.join(HOME, '.local/share/lutris')
 LUTRIS_FLATPAK_DIR = os.path.join(HOME, '.var/app/net.lutris.Lutris/data/lutris')
-INTERPRETERS = re.compile(r'^(python[\d.]*|bash|sh|dash|zsh|perl|ruby|node|java|wine\d*|mono|gjs|electron\d*)$')
-# Обёртки, которые просто запускают следующую за ними команду
-WRAPPERS = {'env', 'nice', 'ionice', 'nohup', 'setsid', 'stdbuf', 'firejail', 'gamemoderun', 'mangohud',
-            'prime-run', 'primusrun', 'optirun'}
+# Интерпретаторы, в том числе настоящие файлы за ссылками в /usr/bin: ruby → ruby3.2, mono → mono-sgen, gjs → gjs-console
+INTERPRETERS = re.compile(r'^(python[\d.]*|bash|sh|dash|zsh|perl[\d.]*|ruby[\d.]*|node(js)?|java|wine\d*|mono(-sgen)?|'
+                          r'gjs(-console)?|electron\d*|lua[\d.]*|php[\d.]*)$')
+# Ключи интерпретатора, после которых идёт код или модуль, а не файл скрипта (у sh -e — это errexit)
+INLINE_CODE = {'python': {'-c', '-m'}, 'perl': {'-e', '-E'}, 'ruby': {'-e'}, 'node': {'-e', '--eval', '-p', '--print'},
+               'nodejs': {'-e', '--eval', '-p', '--print'}, 'gjs': {'-c', '--command'}, 'php': {'-r'}, 'lua': {'-e'},
+               'bash': {'-c'}, 'sh': {'-c'}, 'dash': {'-c'}, 'zsh': {'-c'}}
+# Обёртки, которые запускают следующую за ними команду, и их ключи со значением отдельным словом (nice -n 10)
+WRAPPERS = {'env': {'-u', '--unset', '-C', '--chdir'}, 'nice': {'-n', '--adjustment'},
+            'ionice': {'-c', '--class', '-n', '--classdata'}, 'stdbuf': {'-i', '-o', '-e', '--input', '--output', '--error'},
+            'optirun': {'-b', '--bridge', '-c', '--compress'}, 'nohup': set(), 'setsid': set(), 'firejail': set(),
+            'gamemoderun': set(), 'mangohud': set(), 'prime-run': set(), 'primusrun': set()}
+DATA_DIRS = ('.local/share', '.config', '.cache', '.local/state')
 # Общие папки, которые никогда не считаются «папкой программы» и не удаляются целиком
 COMMON_DIRS = {
     '', '.local', '.local/share', '.local/bin', '.local/lib', '.local/state', '.local/opt', '.config',
@@ -393,15 +408,23 @@ def exec_target(app):
     except ValueError:
         return None, []
     argv = [a for a in argv if not a.startswith('%')]
-    i = 0
-    while i < len(argv) and (os.path.basename(argv[i]) in WRAPPERS or '=' in argv[i] or argv[i].startswith('-')):
+    i, wrapper_values = 0, set()
+    while i < len(argv):
+        if os.path.basename(argv[i]) in WRAPPERS:
+            wrapper_values = WRAPPERS[os.path.basename(argv[i])]
+        elif argv[i] in wrapper_values:
+            i += 1  # значение ключа обёртки: nice -n 10, env -u VAR
+        elif '=' not in argv[i] and not argv[i].startswith('-'):
+            break
         i += 1
     if i >= len(argv):
         return None, []
     exe = shutil.which(argv[i]) or argv[i]
-    if INTERPRETERS.match(os.path.basename(exe)):
+    interpreter = os.path.basename(exe)
+    if INTERPRETERS.match(interpreter):
+        inline = INLINE_CODE.get(re.match(r'[a-z]*', interpreter).group(), set())
         for j in range(i + 1, len(argv)):
-            if argv[j] in ('-c', '-e', '-m'):  # команда или модуль, а не файл
+            if argv[j] in inline:  # команда или модуль, а не файл
                 return None, []
             if not argv[j].startswith('-'):
                 exe, i = os.path.expanduser(argv[j]), j
@@ -413,6 +436,38 @@ def exec_target(app):
             return None, []
         exe = os.path.normpath(os.path.join(workdir, exe))
     return exe, argv[i + 1:]
+
+
+def opens_other(exe, args):
+    """Ярлык открывает программой другое — файл, проект, ссылку или подкоманду (uv run app.py, godot --path ~/proj,
+    steam steam://…), а не запускает саму программу. Значение ключа (Telegram -workdir ~/.local/share/…,
+    --profile work) таким не считается, если это не ссылка и не путь вне папки программы и папок данных."""
+    own = [os.path.dirname(exe)] + [os.path.join(HOME, d) for d in DATA_DIRS]
+
+    def other(value):
+        path = os.path.expanduser(value)
+        if '://' in value:
+            return True
+        return os.path.isabs(path) and not any(home_form(path) == d or home_form(path).startswith(d + '/') for d in own)
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == '--':
+            return i + 1 < len(args)
+        if not arg.startswith('-'):
+            return True  # позиционный аргумент
+        if '=' in arg:
+            value = arg.split('=', 1)[1]
+        elif i + 1 < len(args) and not args[i + 1].startswith('-'):
+            i += 1
+            value = args[i]  # значение ключа отдельным словом
+        else:
+            value = ''
+        if other(value):
+            return True
+        i += 1
+    return False
 
 
 def dpkg_owner(path):
@@ -460,17 +515,18 @@ def classify_local(a, fn, name, desc, icon, deb, deb_level):
         item.extra_files = [p for p in (fn, exe) if p and in_home(p) and (p == fn or os.path.islink(p))]
         return item
 
-    # Программа, запущенная с файлом, проектом, ссылкой или подкомандой (uv run app.py, godot --path …), —
-    # ярлык для них: удалить по нему программу значило бы удалить общий инструмент.
-    opens_other = any(not x.startswith('-') or '://' in x for x in args)
-    if exe and in_home(exe) and in_home(real) and os.path.exists(exe) and not opens_other:
+    # Ярлык, открывающий программой файл, проект или ссылку, — не сама программа: удалить по нему
+    # программу значило бы удалить общий инструмент (uv, cargo) или движок (godot).
+    if exe and in_home(exe) and in_home(real) and os.path.exists(exe) and not opens_other(exe, args):
         item = Pkg(name, os.path.basename(fn), 'local', summary=desc or exe, icon=icon)
         item.local = dict(kind='home', exe=exe, desktop=fn, icon_name=a.get_string('Icon'),
                           names={name, os.path.basename(fn)[:-len('.desktop')], os.path.basename(exe),
                                  a.get_string('Icon') or '', a.get_string('StartupWMClass') or ''})
-        return item
-    return Pkg(name, os.path.basename(fn), 'local', summary=desc or fn, icon=icon, removable=False,
-               level='shortcut')
+    else:
+        item = Pkg(name, os.path.basename(fn), 'local', summary=desc or fn, icon=icon, removable=False,
+                   level='shortcut')
+    item.uses = [exe] if exe and in_home(exe) else []
+    return item
 
 
 def path_size(path):
@@ -574,8 +630,7 @@ def plan_local(item):
     needles = [exe]
     for rr in sorted(roots):
         # в папке есть и другие программы из меню — значит, она общая и по умолчанию не удаляется
-        shared = [n for n, e in L.get('others', ())
-                  if any(p == rr or p.startswith(rr + '/') for p in (home_form(e), home_form(os.path.realpath(e))))]
+        shared = list(dict.fromkeys(n for n, p in L.get('others', ()) if p == rr or p.startswith(rr + '/')))
         add(rr, 'Папка программы', checked=not shared, note=', '.join(shared[:3]))
         if not shared:
             needles.append(rr)
@@ -661,9 +716,10 @@ def kill_processes(roots, log):
             continue
         # Сама программа: её исполняемый файл, команда запуска или скрипт интерпретатора. Не трогаем,
         # например, редактор, в котором просто открыт файл из удаляемой папки.
-        paths = [exe, args[0]]
-        if INTERPRETERS.match(os.path.basename(exe)):
-            paths += [a for a in args[1:] if not a.startswith('-')][:1]
+        cmd = args[:1]
+        if INTERPRETERS.match(os.path.basename(exe)) or INTERPRETERS.match(os.path.basename(args[0])):
+            cmd += [a for a in args[1:] if not a.startswith('-')][:1]
+        paths = [exe] + [home_form(p) if os.path.isabs(p) else p for p in cmd]
         if any(p == r or p.startswith(r + '/') for p in paths for r in roots):
             try:
                 os.kill(int(pid), signal.SIGTERM)
@@ -802,7 +858,10 @@ def collect():
             # установка — по папке, из которой ярлык
             inst = ('user' if home_form(fn).startswith(os.path.join(HOME, '.local/share/flatpak/')) else
                     'system' if fn.startswith('/var/lib/flatpak/') else None)
-            ref = next((k for k in flats if k[0] == fid and inst in (None, k[1])), (fid, inst or 'system', ''))
+            # ветка — та, из которой экспортирован ярлык: …/app/<ID>/<arch>/<ветка>/<commit>/export/…
+            m = re.search('/app/' + re.escape(fid) + r'/[^/]+/([^/]+)/', os.path.realpath(fn))
+            cands = [k for k in flats if k[0] == fid and inst in (None, k[1])]
+            ref = next((k for k in cands if m and k[2] == m.group(1)), cands[0] if cands else (fid, inst or 'system', ''))
             info = flats.get(ref, {})
             item = Pkg(name, flatpak_ref(*ref) if info else fid, 'flatpak', info.get('version', ''),
                        info.get('size', -1), desc, icon, installation=ref[1],
@@ -820,11 +879,26 @@ def collect():
         seen.add(key)
         icons.setdefault((item.source, item.pkg), icon)
         apps.append(item)
-    # программы из одной папки: при удалении одной папка не отмечается для удаления целиком
-    homes = [(it.name, it.local['exe']) for it in apps if it.local and it.local['kind'] == 'home']
+    # Программы из одной папки: при удалении одной папка не отмечается для удаления целиком, если в ней
+    # есть то, что запускают другие пункты меню (другая программа, игра Lutris). Ярлыки той же самой
+    # программы (через симлинк или с другими ключами) папку общей не делают.
+    lutris_dirs = {}
+    for ldir in {it.local['lutris_dir'] for it in apps if it.source == 'lutris'}:
+        try:
+            con = lutris_connect(ldir)
+            lutris_dirs[ldir] = dict(con.execute("select id, directory from games where directory != ''").fetchall())
+            con.close()
+        except sqlite3.Error:
+            pass
+    for it in apps:
+        if it.source == 'lutris':
+            d = lutris_dirs.get(it.local['lutris_dir'], {}).get(it.local['game_id'])
+            it.uses = [d] if d else []
+    users = [(it, {home_form(os.path.realpath(p)) for p in it.uses}) for it in apps if it.uses]
     for it in apps:
         if it.local and it.local['kind'] == 'home':
-            it.local['others'] = [(n, e) for n, e in homes if e != it.local['exe']]
+            own = home_form(os.path.realpath(it.local['exe']))
+            it.local['others'] = [(o.name, p) for o, paths in users if own not in paths for p in paths]
 
     pkgs = []
     for name, i in deb.items():
@@ -1210,33 +1284,42 @@ class Window(Adw.ApplicationWindow):
             removed = re.findall(r'^Remv (\S+)', out, re.M)
             installed = re.findall(r'^Inst (\S+)', out, re.M)
             errors = [l for l in out.splitlines() if l.startswith('E:')]
-            GLib.idle_add(self.show_apt_confirm, item, removed, installed, errors)
+            # удержанные пакеты (apt-mark hold) apt-get -y не меняет — настоящее удаление всё равно не пройдёт
+            held = re.search(r'^The following held packages will be changed:\n((?: .*\n?)+)', out, re.M)
+            GLib.idle_add(self.show_apt_confirm, item, removed, installed, errors, held.group(1).split() if held else [])
         threading.Thread(target=work, daemon=True).start()
+
+    def show_blocked(self, heading, body):
+        dlg = Adw.AlertDialog(heading=heading, body=body)
+        dlg.add_response('ok', tr('Понятно'))
+        dlg.connect('response', lambda *_: self.set_busy(False))
+        dlg.present(self)
 
     def prepare_failed(self, err):
         if self.alive:
             self.toasts.add_toast(Adw.Toast(title=tr('Не удалось подготовить удаление: {err}', err=err)))
             self.set_busy(False)
 
-    def show_apt_confirm(self, item, removed, installed, errors):
+    def show_apt_confirm(self, item, removed, installed, errors, held):
         if not self.alive:
             return
         if not removed:
             self.prepare_failed(errors[0] if errors else tr('нечего удалять'))
             return
+        if held:
+            self.show_blocked(tr('Удаление невозможно'), tr(
+                'Пакеты удержаны от изменений (apt-mark hold), поэтому apt их не удалит: {list}\n\n'
+                'Чтобы удалить, сначала снимите удержание:\n{cmd}',
+                list=', '.join(held), cmd='sudo apt-mark unhold ' + ' '.join(held)))
+            return
         critical = [p for p in removed if self.levels.get(p.split(':')[0]) == 'protected']
         system = [p for p in removed if self.levels.get(p.split(':')[0]) == 'system']
         if critical and self.protected_locked():
-            dlg = Adw.AlertDialog(
-                heading=tr('Удаление заблокировано'),
-                body=tr('Вместе с «{name}» будут удалены защищённые системные пакеты ({n}), без которых Ubuntu '
-                        'может не загрузиться или потерять рабочий стол:\n\n{list}\n\nЕсли вы точно знаете, '
-                        'что делаете, включите в меню ☰ «Разрешить удаление защищённых».',
-                        name=item.name, n=len(critical),
-                        list=', '.join(critical[:15]) + (' …' if len(critical) > 15 else '')))
-            dlg.add_response('ok', tr('Понятно'))
-            dlg.connect('response', lambda *_: self.set_busy(False))
-            dlg.present(self)
+            self.show_blocked(tr('Удаление заблокировано'), tr(
+                'Вместе с «{name}» будут удалены защищённые системные пакеты ({n}), без которых Ubuntu '
+                'может не загрузиться или потерять рабочий стол:\n\n{list}\n\nЕсли вы точно знаете, '
+                'что делаете, включите в меню ☰ «Разрешить удаление защищённых».',
+                name=item.name, n=len(critical), list=', '.join(critical[:15]) + (' …' if len(critical) > 15 else '')))
             return
         body = tr('Будут удалены пакеты ({n}):', n=len(removed))
         if installed:
