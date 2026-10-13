@@ -27,7 +27,7 @@ mkdir -p "$APPS" "$HOME/.local/bin"
 ln -sf "$DEST/app-manager.py" "$HOME/.local/bin/app-manager"
 rm -f "$APPS/local.appmanager.desktop"  # старое имя ярлыка
 install -Dm644 "$DIR/$APP_ID.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/$APP_ID.svg"
-gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+touch "$HOME/.local/share/icons/hicolor"  # чтобы оболочка перечитала значки
 sed "s|@EXEC@|python3 $DEST/app-manager.py|" "$DIR/$APP_ID.desktop" > "$APPS/$APP_ID.desktop"
 update-desktop-database "$APPS" 2>/dev/null || true
 
