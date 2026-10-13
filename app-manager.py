@@ -174,9 +174,9 @@ PROTECTED_ROOTS = {
 SYSTEM_ROOTS = {'ubuntu-desktop', 'ubuntu-desktop-minimal', 'ubuntu-standard', 'ubuntu-minimal',
                 'ubuntu-server', 'ubuntu-restricted-addons', 'ubuntu-desktop-bootstrap'}
 PROTECTED_SNAPS = {'snapd'}
-SYSTEM_SNAPS_RE = re.compile(r'^(core\d*|bare|gnome-[\d-]+(-sdk)?|kf[56]-core\d+|mesa-[\w-]+|gtk2?-common-themes|'
-                             r'snap-store|snapd-desktop-integration|firmware-updater|desktop-security-center|'
-                             r'prompting-client|firefox|thunderbird)$')
+SYSTEM_SNAPS_RE = re.compile(r'^(core\d*|bare|gnome-[\d-]+(-sdk)?|kf[56]-[\w-]+|kde-frameworks-[\w-]+|mesa-[\w-]+|'
+                             r'gtk2?-common-themes|snap-store|snapd-desktop-integration|firmware-updater|'
+                             r'desktop-security-center|prompting-client|firefox|thunderbird)$')
 
 
 def run(cmd):
@@ -230,6 +230,11 @@ def dep_alternatives(field):
     return groups
 
 
+def deb_installed(status):
+    """${db:Status-Abbrev}: 1-й символ — желаемое действие (h — пакет удержан), 2-й — состояние (i — установлен)."""
+    return status[1:2] == 'i'
+
+
 def classify_debs():
     """Возвращает {имя_пакета: 'protected' | 'system' | 'user'} для установленных deb-пакетов."""
     meta, providers = {}, {}
@@ -237,7 +242,7 @@ def classify_debs():
                '${Pre-Depends}\t${Depends}\t${Recommends}\t${Provides}\n'])
     for line in out.splitlines():
         p = line.split('\t')
-        if len(p) < 8 or not p[1].startswith('ii'):
+        if len(p) < 8 or not deb_installed(p[1]):
             continue
         name = p[0]
         meta[name] = dict(essential=p[2] == 'yes', priority=p[3],
@@ -284,40 +289,60 @@ def snap_level(name, is_base):
 
 # ---------- программы, установленные не через пакетный менеджер
 
-HOME = os.path.expanduser('~')
+HOME = os.path.abspath(os.path.expanduser('~'))
+REAL_HOME = os.path.realpath(HOME)  # отличается, если домашняя папка (или /home) — символическая ссылка
 LUTRIS_DIR = os.path.join(HOME, '.local/share/lutris')
 LUTRIS_FLATPAK_DIR = os.path.join(HOME, '.var/app/net.lutris.Lutris/data/lutris')
 INTERPRETERS = re.compile(r'^(python[\d.]*|bash|sh|dash|zsh|perl|ruby|node|java|wine\d*|mono|gjs|electron\d*)$')
+# Обёртки, которые просто запускают следующую за ними команду
+WRAPPERS = {'env', 'nice', 'ionice', 'nohup', 'setsid', 'stdbuf', 'firejail', 'gamemoderun', 'mangohud',
+            'prime-run', 'primusrun', 'optirun'}
 # Общие папки, которые никогда не считаются «папкой программы» и не удаляются целиком
 COMMON_DIRS = {
     '', '.local', '.local/share', '.local/bin', '.local/lib', '.local/state', '.local/opt', '.config',
-    '.cache', '.var', '.var/app', 'snap', 'bin', 'opt', 'Applications', 'Apps', 'AppImages', 'Programs',
-    'apps', 'Games', '.local/share/applications', '.local/share/icons', '.config/autostart',
+    '.cache', '.var', '.var/app', 'snap', 'bin', 'opt', 'Applications', 'Apps', 'AppImages', 'AppImage',
+    '.appimages', 'Programs', 'Games', 'Software', 'Soft', 'Tools', 'Utils', 'Portable', '.apps', '.opt',
+    '.local/share/applications', '.local/share/icons', '.config/autostart',
     '.config/systemd', '.config/systemd/user', '.local/share/lutris',
     # общие папки инструментов и пользовательских проектов — целиком никогда не удаляются
     '.cargo', '.cargo/bin', '.rustup', 'go', 'go/bin', '.go', '.npm', '.npm-global', '.nvm', '.pyenv', '.rbenv',
     '.sdkman', '.deno', '.bun', '.conda', '.wine', '.virtualenvs', '.local/share/virtualenvs',
     '.local/share/pipx', '.local/share/pipx/venvs', '.local/share/uv', '.local/share/uv/tools',
-    '.local/share/JetBrains', '.local/share/Steam', '.steam', '.local/share/flatpak',
-    'Projects', 'projects', 'code', 'Code', 'dev', 'src', 'git', 'repos', 'workspace', 'Development',
+    '.local/share/JetBrains', '.local/share/JetBrains/Toolbox', '.local/share/JetBrains/Toolbox/apps',
+    '.local/share/Steam', '.steam', '.local/share/flatpak',
+    'Projects', 'code', 'dev', 'src', 'git', 'repos', 'workspace', 'Development',
 }
 GENERIC_NAMES = {'app', 'apps', 'bin', 'run', 'start', 'launch', 'launcher', 'main', 'apprun', 'desktop',
-                 'client', 'python', 'python3', 'program', 'programs'}
+                 'client', 'python', 'python3', 'program', 'programs', 'icon', 'icons', 'logo',
+                 'appimage', 'appimages'}
 for _d in ('DIRECTORY_DESKTOP', 'DIRECTORY_DOCUMENTS', 'DIRECTORY_DOWNLOAD', 'DIRECTORY_MUSIC',
            'DIRECTORY_PICTURES', 'DIRECTORY_PUBLIC_SHARE', 'DIRECTORY_TEMPLATES', 'DIRECTORY_VIDEOS'):
     _p = GLib.get_user_special_dir(getattr(GLib.UserDirectory, _d))
     if _p and _p.startswith(HOME + '/'):
         COMMON_DIRS.add(os.path.relpath(_p, HOME))
 COMMON_DIRS |= {'Desktop', 'Documents', 'Downloads', 'Music', 'Pictures', 'Videos', 'Public', 'Templates'}
+COMMON_DIRS = {d.lower() for d in COMMON_DIRS}  # без учёта регистра: ~/games, ~/appimages, ~/tools
+REVERSE_DNS = re.compile(r'[A-Za-z][\w-]*(\.[A-Za-z][\w-]*){2,}')  # org.example.FooBar
+
+
+def home_form(path):
+    """Абсолютный путь; путь в настоящей домашней папке записывается через HOME (realpath даёт другой)."""
+    path = os.path.abspath(path)
+    if path == REAL_HOME or path.startswith(REAL_HOME + '/'):
+        path = HOME + path[len(REAL_HOME):]
+    return path
 
 
 def in_home(path):
-    return bool(path) and os.path.abspath(path).startswith(HOME + '/')
+    return bool(path) and home_form(path).startswith(HOME + '/')
+
+
+def is_common(path):
+    return os.path.relpath(home_form(path), HOME).lower() in COMMON_DIRS
 
 
 def safe_to_delete(path):
-    path = os.path.abspath(path)
-    return in_home(path) and os.path.relpath(path, HOME) not in COMMON_DIRS
+    return in_home(path) and not is_common(path)
 
 
 def norm_name(text):
@@ -330,7 +355,12 @@ def app_keys(names):
     for n in names:
         if not n:
             continue
-        for part in (n, os.path.splitext(n)[0], n.split('.')[-1] if '.' in n else n):
+        if os.path.isabs(n):  # Icon= бывает путём: папки на пути — не название программы
+            n = os.path.basename(n)
+        parts = [n, os.path.splitext(n)[0]]
+        if REVERSE_DNS.fullmatch(n):  # у файлов (Foo.AppImage, run.bash) последняя часть — расширение
+            parts.append(n.rsplit('.', 1)[1])
+        for part in parts:
             k = norm_name(part)
             if len(k) >= 3 and k not in GENERIC_NAMES:
                 keys.add(k)
@@ -338,39 +368,51 @@ def app_keys(names):
 
 
 def install_root(path, keys):
-    """Папка программы в $HOME, содержащая path: самая верхняя папка, чьё имя совпадает с названием
+    """Папка программы в $HOME, содержащая path: самая верхняя папка, в имени которой есть название
     программы (общие папки пропускаются). None — если такой нет, тогда удаляется только сам файл."""
     if not in_home(path):
         return None
-    parts = os.path.relpath(os.path.abspath(path), HOME).split('/')
+    parts = os.path.relpath(home_form(path), HOME).split('/')
     for i in range(1, len(parts)):
         cand = '/'.join(parts[:i])
-        if cand in COMMON_DIRS:
+        if cand.lower() in COMMON_DIRS:
             continue
         d = norm_name(parts[i - 1])
-        if len(d) >= 3 and d not in GENERIC_NAMES and any(k in d or d in k for k in keys):
+        # Только «имя папки содержит название», не наоборот: иначе короткое имя общей папки
+        # (Toolbox, Android) совпало бы с длинным названием программы и папка удалилась бы целиком.
+        if d not in GENERIC_NAMES and any(k in d for k in keys):
             return os.path.join(HOME, cand)
     return None
 
 
 def exec_target(app):
-    """Исполняемый файл программы из строки Exec (пропуская env, VAR=..., интерпретаторы)."""
+    """Исполняемый файл программы из строки Exec (пропуская env, VAR=..., обёртки; для интерпретатора —
+    скрипт) и аргументы после него. (None, []) — если файл не определить (sh -c, python -m, нет в PATH)."""
     try:
         argv = shlex.split(app.get_commandline() or '')
     except ValueError:
-        return None
+        return None, []
     argv = [a for a in argv if not a.startswith('%')]
     i = 0
-    while i < len(argv) and (argv[i] == 'env' or '=' in argv[i] or argv[i].startswith('-')):
+    while i < len(argv) and (os.path.basename(argv[i]) in WRAPPERS or '=' in argv[i] or argv[i].startswith('-')):
         i += 1
     if i >= len(argv):
-        return None
+        return None, []
     exe = shutil.which(argv[i]) or argv[i]
     if INTERPRETERS.match(os.path.basename(exe)):
-        for arg in argv[i + 1:]:
-            if not arg.startswith('-'):
-                return os.path.expanduser(arg)
-    return exe
+        for j in range(i + 1, len(argv)):
+            if argv[j] in ('-c', '-e', '-m'):  # команда или модуль, а не файл
+                return None, []
+            if not argv[j].startswith('-'):
+                exe, i = os.path.expanduser(argv[j]), j
+                break
+    if not os.path.isabs(exe):
+        # относительный путь отсчитывается от Path= ярлыка, а не от текущей папки менеджера
+        workdir = app.get_string('Path')
+        if not workdir or not os.path.isabs(workdir):
+            return None, []
+        exe = os.path.normpath(os.path.join(workdir, exe))
+    return exe, argv[i + 1:]
 
 
 def dpkg_owner(path):
@@ -402,10 +444,13 @@ def classify_local(a, fn, name, desc, icon, deb, deb_level):
                           lutris_dir=LUTRIS_FLATPAK_DIR if flatpak else LUTRIS_DIR)
         return item
 
-    exe = exec_target(a)
-    real = os.path.realpath(exe) if exe and os.path.isabs(exe) else exe
+    exe, args = exec_target(a)
+    real = os.path.realpath(exe) if exe else None
     owner = system_desktop_owner(os.path.basename(fn)) if in_home(fn) else None
-    if not owner and real and os.path.isabs(real) and not in_home(real):
+    # По исполняемому файлу пакет определяется только для ярлыка без аргументов: ярлык с аргументами —
+    # веб-приложение браузера, игра Steam или отдельный профиль, а не сам браузер или Steam.
+    # Команды снапов (/snap/bin/* → /usr/bin/snap) к deb-пакетам не относятся.
+    if not owner and real and not in_home(real) and not args and not exe.startswith('/snap/'):
         owner = dpkg_owner(real)
     if owner and owner in deb:
         info = deb[owner]
@@ -415,7 +460,10 @@ def classify_local(a, fn, name, desc, icon, deb, deb_level):
         item.extra_files = [p for p in (fn, exe) if p and in_home(p) and (p == fn or os.path.islink(p))]
         return item
 
-    if exe and in_home(exe) and in_home(real) and os.path.exists(exe):
+    # Программа, запущенная с файлом, проектом, ссылкой или подкомандой (uv run app.py, godot --path …), —
+    # ярлык для них: удалить по нему программу значило бы удалить общий инструмент.
+    opens_other = any(not x.startswith('-') or '://' in x for x in args)
+    if exe and in_home(exe) and in_home(real) and os.path.exists(exe) and not opens_other:
         item = Pkg(name, os.path.basename(fn), 'local', summary=desc or exe, icon=icon)
         item.local = dict(kind='home', exe=exe, desktop=fn, icon_name=a.get_string('Icon'),
                           names={name, os.path.basename(fn)[:-len('.desktop')], os.path.basename(exe),
@@ -433,15 +481,18 @@ def path_size(path):
 
 
 def icon_files(icon_name):
+    """Файлы значка: тема hicolor (туда программы ставят свои значки) и значки вне тем. Другие темы
+    (Papirus и т. п.) не трогаются: значок с таким именем там общий для всех программ."""
     if not icon_name:
         return []
     if os.path.isabs(icon_name):
         return [icon_name] if in_home(icon_name) and os.path.exists(icon_name) else []
-    res = []
-    for base in (os.path.join(HOME, '.local/share/icons'), os.path.join(HOME, '.icons'),
-                 os.path.join(HOME, '.local/share/pixmaps')):
-        res += glob.glob(os.path.join(glob.escape(base), '**', glob.escape(icon_name) + '.*'), recursive=True)
-    return res
+    name = glob.escape(icon_name) + '.*'
+    res = glob.glob(os.path.join(glob.escape(os.path.join(HOME, '.local/share/pixmaps')), name))
+    for base in (os.path.join(HOME, '.local/share/icons'), os.path.join(HOME, '.icons')):
+        base = glob.escape(base)
+        res += glob.glob(os.path.join(base, 'hicolor', '**', name), recursive=True) + glob.glob(os.path.join(base, name))
+    return [f for f in res if os.path.splitext(os.path.basename(f))[0] == icon_name]
 
 
 def references(path, needles):
@@ -462,7 +513,9 @@ def plan_local(item):
         if kind == 'path':
             if not path or not os.path.lexists(path) or not safe_to_delete(path):
                 return
-            if any(e['kind'] == 'path' and (path == e['path'] or path.startswith(e['path'] + '/')) for e in entries):
+            # уже входит в удаляемую папку; если папка общая и не отмечена — файл добавляется отдельно
+            if any(e['kind'] == 'path' and (path == e['path'] or e['checked'] and path.startswith(e['path'] + '/'))
+                   for e in entries):
                 return
         entries.append(dict(kind=kind, path=path, label=label, group=group, checked=checked, note=note))
 
@@ -509,7 +562,8 @@ def plan_local(item):
         if os.path.getsize(exe) < 64_000:
             with open(exe, errors='ignore') as f:
                 text = f.read()
-            for ref in re.findall(r'(?:\$HOME|~|' + re.escape(HOME) + r')(/[^\s"\'`;|&<>]+)', text):
+            homes = '|'.join(re.escape(h) for h in {HOME, REAL_HOME})
+            for ref in re.findall(r'(?:\$HOME|~|' + homes + r')(/[^\s"\'`;|&<>]+)', text):
                 ref = HOME + ref
                 if os.path.isfile(ref) and os.access(ref, os.X_OK):
                     rr = install_root(ref, keys)
@@ -517,14 +571,19 @@ def plan_local(item):
                         roots.add(rr)
     except OSError:
         pass
+    needles = [exe]
     for rr in sorted(roots):
-        add(rr, 'Папка программы')
+        # в папке есть и другие программы из меню — значит, она общая и по умолчанию не удаляется
+        shared = [n for n, e in L.get('others', ())
+                  if any(p == rr or p.startswith(rr + '/') for p in (home_form(e), home_form(os.path.realpath(e))))]
+        add(rr, 'Папка программы', checked=not shared, note=', '.join(shared[:3]))
+        if not shared:
+            needles.append(rr)
     add(exe, 'Исполняемый файл')
     add(L['desktop'], 'Ярлык в меню')
     for f in icon_files(L['icon_name']):
         add(f, 'Значок')
 
-    needles = [exe, *roots]
     for unit in glob.glob(os.path.join(HOME, '.config/systemd/user/*.service')):
         if os.path.isfile(unit) and not os.path.islink(unit) and references(unit, needles):
             entries.append(dict(kind='unit', path=unit, label='Фоновая служба (будет остановлена)',
@@ -586,6 +645,7 @@ def process_alive(pid):
 
 def kill_processes(roots, log):
     """Завершает процессы, запущенные из удаляемых путей, и ждёт их выхода (SIGTERM, затем SIGKILL)."""
+    roots = [home_form(r) for r in roots]
     if not roots:
         return
     me = os.getpid()
@@ -594,17 +654,21 @@ def kill_processes(roots, log):
         if int(pid) == me:
             continue
         try:
-            exe = os.readlink(f'/proc/{pid}/exe')
+            exe = home_form(os.readlink(f'/proc/{pid}/exe'))
             with open(f'/proc/{pid}/cmdline', 'rb') as f:
-                args = f.read().split(b'\0')[:3]
+                args = [a.decode(errors='ignore') for a in f.read().split(b'\0')]
         except OSError:
             continue
-        paths = [exe] + [a.decode(errors='ignore') for a in args]
+        # Сама программа: её исполняемый файл, команда запуска или скрипт интерпретатора. Не трогаем,
+        # например, редактор, в котором просто открыт файл из удаляемой папки.
+        paths = [exe, args[0]]
+        if INTERPRETERS.match(os.path.basename(exe)):
+            paths += [a for a in args[1:] if not a.startswith('-')][:1]
         if any(p == r or p.startswith(r + '/') for p in paths for r in roots):
             try:
                 os.kill(int(pid), signal.SIGTERM)
                 killed.append(int(pid))
-                log(tr('Завершён процесс {pid}: {name}\n', pid=pid, name=paths[1] or exe))
+                log(tr('Завершён процесс {pid}: {name}\n', pid=pid, name=args[0] or exe))
             except OSError:
                 pass
     deadline = time.monotonic() + 5
@@ -628,8 +692,7 @@ def remove_local(entries, log):
         if e['kind'] == 'unit':
             unit = os.path.basename(e['path'])
             log(tr('Останавливаю службу {unit}\n', unit=unit))
-            subprocess.run(['systemctl', '--user', 'disable', '--now', unit],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            run(['systemctl', '--user', 'disable', '--now', unit])
     kill_processes([e['path'] for e in entries if e['kind'] == 'path' and os.path.isdir(e['path'])]
                    + [e['path'] for e in entries if e['label'] == 'Исполняемый файл'], log)
     for e in entries:
@@ -658,9 +721,8 @@ def remove_local(entries, log):
                 errors += 1
                 log(tr('Ошибка: {path}: {err}\n', path=path, err=ex))
     if any(e['kind'] == 'unit' for e in entries):
-        subprocess.run(['systemctl', '--user', 'daemon-reload'])
-    subprocess.run(['update-desktop-database', os.path.join(HOME, '.local/share/applications')],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run(['systemctl', '--user', 'daemon-reload'])
+    run(['update-desktop-database', os.path.join(HOME, '.local/share/applications')])
     return 1 if errors else 0
 
 
@@ -676,7 +738,7 @@ def collect():
                '${db:Status-Abbrev}\t${binary:Summary}\n'])
     for line in out.splitlines():
         p = line.split('\t')
-        if len(p) < 5 or not p[3].startswith('ii'):
+        if len(p) < 5 or not deb_installed(p[3]):
             continue
         deb[p[0]] = dict(version=p[1], size=int(p[2]) * 1024 if p[2].isdigit() else -1, summary=p[4])
     manual = {m.split(':')[0] for m in run(['apt-mark', 'showmanual']).split()}
@@ -692,15 +754,23 @@ def collect():
         snaps[name] = dict(version=ver, size=os.path.getsize(f) if os.path.exists(f) else -1,
                            system=any(k in notes for k in ('base', 'core', 'snapd', 'kernel', 'gadget')))
 
+    # flatpak: (ID, установка, ветка) — приложение может стоять и в user, и в system, среда — в нескольких ветках
     flats = {}
     for kind in ('--app', '--runtime'):
-        out = run(['flatpak', 'list', kind, '--columns=application,name,version,size,installation'])
+        out = run(['flatpak', 'list', kind, '--columns=application,name,version,size,installation,branch'])
         for line in out.splitlines():
             p = line.split('\t')
-            if len(p) < 5:
+            if len(p) < 6:
                 continue
-            flats.setdefault(p[0], dict(name=p[1], version=p[2], size=parse_size(p[3]),
-                                        installation=p[4], runtime=kind == '--runtime'))
+            flats[p[0], p[4], p[5]] = dict(name=p[1], version=p[2], size=parse_size(p[3]),
+                                           runtime=kind == '--runtime')
+    branches = {}
+    for fid, inst, _branch in flats:
+        branches[fid, inst] = branches.get((fid, inst), 0) + 1
+
+    def flatpak_ref(fid, inst, branch):
+        """Что передать flatpak uninstall: ID, а если в установке несколько веток — ID//ветка."""
+        return fid if branches[fid, inst] == 1 else f'{fid}//{branch}'
 
     # Приложения из меню (.desktop) и их пакеты
     infos = [a for a in Gio.AppInfo.get_all()
@@ -728,10 +798,14 @@ def collect():
             item = Pkg(name, pkg, 'snap', info.get('version', ''), info.get('size', -1), desc, icon,
                        level=snap_level(pkg, info.get('system', False)))
         elif flat or '/flatpak/exports/' in fn:
-            pkg = flat or os.path.basename(fn)[:-len('.desktop')]
-            info = flats.get(pkg, {})
-            item = Pkg(name, pkg, 'flatpak', info.get('version', ''), info.get('size', -1), desc, icon,
-                       installation=info.get('installation', 'system'),
+            fid = flat or os.path.basename(fn)[:-len('.desktop')]
+            # установка — по папке, из которой ярлык
+            inst = ('user' if home_form(fn).startswith(os.path.join(HOME, '.local/share/flatpak/')) else
+                    'system' if fn.startswith('/var/lib/flatpak/') else None)
+            ref = next((k for k in flats if k[0] == fid and inst in (None, k[1])), (fid, inst or 'system', ''))
+            info = flats.get(ref, {})
+            item = Pkg(name, flatpak_ref(*ref) if info else fid, 'flatpak', info.get('version', ''),
+                       info.get('size', -1), desc, icon, installation=ref[1],
                        level='system' if info.get('runtime') else 'user')
         elif os.path.realpath(fn) in path_to_deb:
             pkg = path_to_deb[os.path.realpath(fn)]
@@ -746,6 +820,11 @@ def collect():
         seen.add(key)
         icons.setdefault((item.source, item.pkg), icon)
         apps.append(item)
+    # программы из одной папки: при удалении одной папка не отмечается для удаления целиком
+    homes = [(it.name, it.local['exe']) for it in apps if it.local and it.local['kind'] == 'home']
+    for it in apps:
+        if it.local and it.local['kind'] == 'home':
+            it.local['others'] = [(n, e) for n, e in homes if e != it.local['exe']]
 
     pkgs = []
     for name, i in deb.items():
@@ -754,10 +833,11 @@ def collect():
     for name, i in snaps.items():
         pkgs.append(Pkg(name, name, 'snap', i['version'], i['size'], '',
                         icons.get(('snap', name)), manual=not i['system'], level=snap_level(name, i['system'])))
-    for fid, i in flats.items():
-        pkgs.append(Pkg(i['name'] or fid, fid, 'flatpak', i['version'], i['size'],
-                        tr('Среда выполнения') if i['runtime'] else '', icons.get(('flatpak', fid)),
-                        manual=not i['runtime'], installation=i['installation'],
+    for (fid, inst, branch), i in flats.items():
+        ref = flatpak_ref(fid, inst, branch)
+        pkgs.append(Pkg(i['name'] or fid, ref, 'flatpak', i['version'], i['size'],
+                        tr('Среда выполнения') if i['runtime'] else '', icons.get(('flatpak', ref)),
+                        manual=not i['runtime'], installation=inst,
                         level='system' if i['runtime'] else 'user'))
     return apps, pkgs
 
@@ -781,6 +861,7 @@ class Window(Adw.ApplicationWindow):
         self.mode = 'apps'
         self.levels = {}
         self.alive = True   # окно могут закрыть (смена языка), пока работают фоновые потоки
+        self.busy = False   # идёт удаление: от подтверждения до закрытия журнала
         self.connect('destroy', lambda *_: setattr(self, 'alive', False))
         self.allow = Gio.SimpleAction.new_stateful('allow-protected', None, GLib.Variant('b', False))
         self.allow.connect('change-state', self.on_allow)
@@ -978,7 +1059,8 @@ class Window(Adw.ApplicationWindow):
             for item in apps:
                 if item.local and item.removable:
                     try:
-                        item.size = sum(entry_size(e) for e in plan_local(item) if e['group'] == 'program') or -1
+                        item.size = sum(entry_size(e) for e in plan_local(item)
+                                        if e['group'] == 'program' and e['checked']) or -1
                     except OSError:
                         continue
             GLib.idle_add(self.refresh_rows, apps)
@@ -990,6 +1072,7 @@ class Window(Adw.ApplicationWindow):
         for item in apps:
             if item.local:
                 item.emit('changed')
+        self.cv.get_sorter().changed(Gtk.SorterChange.DIFFERENT)  # пересортировать по новым размерам
         self.update_status()
 
     def loaded(self, apps, pkgs):
@@ -1073,7 +1156,7 @@ class Window(Adw.ApplicationWindow):
     def update_buttons(self):
         item = self.sel.get_selected_item()
         tip = None
-        ok = bool(item and item.removable)
+        ok = bool(item and item.removable) and not self.busy
         if item and not item.removable:
             tip = tr('Программа установлена вне домашней папки и не через пакет — удалить отсюда нельзя')
         elif item and item.level == 'protected' and self.protected_locked():
@@ -1101,6 +1184,7 @@ class Window(Adw.ApplicationWindow):
         item = self.sel.get_selected_item()
         if not item or not self.remove_btn.get_sensitive():
             return
+        self.set_busy(True)  # повторный клик или Delete из диалога не начнут второе удаление
         if item.source == 'apt':
             self.confirm_apt(item)
         elif item.source in ('local', 'lutris'):
@@ -1118,19 +1202,27 @@ class Window(Adw.ApplicationWindow):
 
     def confirm_apt(self, item):
         def work():
-            out = run(['apt-get', '-s', 'remove', item.pkg])
+            try:
+                out = run(['apt-get', '-s', 'remove', item.pkg])
+            except Exception as ex:  # noqa: BLE001
+                GLib.idle_add(self.prepare_failed, str(ex))
+                return
             removed = re.findall(r'^Remv (\S+)', out, re.M)
             installed = re.findall(r'^Inst (\S+)', out, re.M)
             errors = [l for l in out.splitlines() if l.startswith('E:')]
             GLib.idle_add(self.show_apt_confirm, item, removed, installed, errors)
         threading.Thread(target=work, daemon=True).start()
 
+    def prepare_failed(self, err):
+        if self.alive:
+            self.toasts.add_toast(Adw.Toast(title=tr('Не удалось подготовить удаление: {err}', err=err)))
+            self.set_busy(False)
+
     def show_apt_confirm(self, item, removed, installed, errors):
         if not self.alive:
             return
         if not removed:
-            self.toasts.add_toast(Adw.Toast(title=tr('Не удалось подготовить удаление: {err}',
-                                                     err=errors[0] if errors else tr('нечего удалять'))))
+            self.prepare_failed(errors[0] if errors else tr('нечего удалять'))
             return
         critical = [p for p in removed if self.levels.get(p.split(':')[0]) == 'protected']
         system = [p for p in removed if self.levels.get(p.split(':')[0]) == 'system']
@@ -1143,6 +1235,7 @@ class Window(Adw.ApplicationWindow):
                         name=item.name, n=len(critical),
                         list=', '.join(critical[:15]) + (' …' if len(critical) > 15 else '')))
             dlg.add_response('ok', tr('Понятно'))
+            dlg.connect('response', lambda *_: self.set_busy(False))
             dlg.present(self)
             return
         body = tr('Будут удалены пакеты ({n}):', n=len(removed))
@@ -1163,9 +1256,13 @@ class Window(Adw.ApplicationWindow):
 
     def confirm_local(self, item):
         def work():
-            entries = plan_local(item)
-            for e in entries:
-                e['size'] = entry_size(e)
+            try:
+                entries = plan_local(item)
+                for e in entries:
+                    e['size'] = entry_size(e)
+            except Exception as ex:  # noqa: BLE001
+                GLib.idle_add(self.prepare_failed, str(ex))
+                return
             lutris_running = item.source == 'lutris' and bool(run(['pgrep', '-x', 'lutris']).strip())
             GLib.idle_add(self.show_local_confirm, item, entries, lutris_running)
         threading.Thread(target=work, daemon=True).start()
@@ -1175,6 +1272,7 @@ class Window(Adw.ApplicationWindow):
             return
         if not entries:
             self.toasts.add_toast(Adw.Toast(title=tr('Не нашёл файлов программы для удаления')))
+            self.set_busy(False)
             return
         body = tr('Игра установлена через Lutris.' if item.source == 'lutris' else
                   'Программа установлена вручную, не через пакетный менеджер.')
@@ -1222,6 +1320,8 @@ class Window(Adw.ApplicationWindow):
             chosen = [e for cb, e in checks if cb.get_active()]
             if resp == 'remove' and chosen:
                 self.execute(item, func=lambda log: remove_local(chosen, log))
+            else:
+                self.set_busy(False)
         dlg.connect('response', on_resp)
         dlg.present(self)
 
@@ -1252,17 +1352,24 @@ class Window(Adw.ApplicationWindow):
         def on_resp(_d, resp):
             if resp == 'remove':
                 self.execute(item, make_cmd(purge.get_active() if purge else False))
+            else:
+                self.set_busy(False)
         dlg.connect('response', on_resp)
         dlg.present(self)
 
     def set_busy(self, busy):
-        """Пока идёт удаление, язык не переключается (окно пересоздаётся и журнал потерялся бы)."""
-        action = self.get_application().lookup_action('language')
+        """Пока идёт удаление (от подтверждения до закрытия журнала), второе не начинается, а язык
+        не переключается (окно пересоздаётся, и журнал потерялся бы)."""
+        self.busy = busy
+        if not self.alive:
+            return
+        app = self.get_application()
+        action = app.lookup_action('language') if app else None
         if action:
             action.set_enabled(not busy)
+        self.update_buttons()
 
     def execute(self, item, cmd=None, func=None):
-        self.set_busy(True)
         buf = Gtk.TextBuffer()
         tv = Gtk.TextView(buffer=buf, editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
                           left_margin=8, right_margin=8, top_margin=8, bottom_margin=8)
@@ -1276,6 +1383,7 @@ class Window(Adw.ApplicationWindow):
         dlg = Adw.Dialog(title=tr('Удаление «{name}»', name=item.name), content_width=650, content_height=420,
                          child=tbv, can_close=False)
         close.connect('clicked', lambda *_: dlg.force_close())
+        dlg.connect('closed', lambda *_: self.set_busy(False))
         dlg.present(self)
 
         def append(text):
@@ -1283,7 +1391,6 @@ class Window(Adw.ApplicationWindow):
             tv.scroll_to_mark(buf.get_insert(), 0, False, 0, 0)
 
         def finished(code):
-            self.set_busy(False)
             spinner.set_visible(False)
             close.set_sensitive(True)
             dlg.set_can_close(True)
@@ -1302,26 +1409,24 @@ class Window(Adw.ApplicationWindow):
             GLib.idle_add(append, text)
 
         def work():
-            if func:
-                try:
-                    code = func(log)
-                except Exception as e:  # noqa: BLE001
-                    log(f'{e}\n')
-                    code = -1
-                GLib.idle_add(finished, code)
-                return
+            code = -1
             try:
-                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     stdin=subprocess.DEVNULL, text=True, bufsize=1)
-                for line in p.stdout:
-                    GLib.idle_add(append, line)
-                code = p.wait()
+                if func:
+                    code = func(log)
+                else:
+                    # errors='replace': байт не в UTF-8 в выводе apt не должен прерывать чтение журнала
+                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         stdin=subprocess.DEVNULL, text=True, errors='replace', bufsize=1)
+                    for line in p.stdout:
+                        log(line)
+                    code = p.wait()
+                    if code == 0 and item.extra_files:
+                        remove_local([dict(kind='path', path=f, label='Ярлык', note='') for f in item.extra_files],
+                                     log)
             except Exception as e:  # noqa: BLE001
-                GLib.idle_add(append, f'{e}\n')
-                code = -1
-            if code == 0 and item.extra_files:
-                remove_local([dict(kind='path', path=f, label='Ярлык', note='') for f in item.extra_files], log)
-            GLib.idle_add(finished, code)
+                log(f'{e}\n')
+            finally:
+                GLib.idle_add(finished, code)  # иначе журнал останется незакрываемым
         if cmd:
             append('$ ' + ' '.join(cmd) + '\n\n')
         threading.Thread(target=work, daemon=True).start()

@@ -26,6 +26,8 @@ See everything installed on your computer in one list and uninstall what you don
   the removal if any protected package is affected. You can unlock this in the ☰ menu if you really need to.
 - **Manually installed apps:** finds the program folder, menu shortcut, icons, systemd background services
   and autostart entries, and shows the list with sizes before deleting. Your data and settings are kept by default.
+  A folder shared with other apps is never selected by default, and shortcuts that just open a web app, a game
+  or a project with another program (a browser, Steam, `uv run …`) are shown as shortcuts and leave that program alone.
 - **"All packages" tab** — every package on the system, with a "manually installed only" filter.
 - **English and Russian UI** — follows your system language; switch it in ☰ → Language.
 
