@@ -7,6 +7,8 @@
 A simple app manager for Ubuntu — like **"Add or Remove Programs" in Windows**.
 See everything installed on your computer in one list and uninstall what you don't need in a couple of clicks.
 
+![Installed Apps — main window](screenshots/apps.png)
+
 ## Features
 
 - **Every source in one list:** APT (deb), Snap, Flatpak, Lutris games, and apps installed manually
@@ -26,6 +28,11 @@ See everything installed on your computer in one list and uninstall what you don
   and autostart entries, and shows the list with sizes before deleting. Your data and settings are kept by default.
 - **"All packages" tab** — every package on the system, with a "manually installed only" filter.
 - **English and Russian UI** — follows your system language; switch it in ☰ → Language.
+
+<p>
+  <img src="screenshots/packages.png" width="49%" alt="All packages tab">
+  <img src="screenshots/uninstall.png" width="49%" alt="Uninstall confirmation">
+</p>
 
 ## Requirements
 

@@ -201,6 +201,8 @@ def parse_size(text):
 
 
 class Pkg(GObject.Object):
+    __gsignals__ = {'changed': (GObject.SignalFlags.RUN_FIRST, None, ())}  # размер посчитан позже
+
     def __init__(self, name, pkg, source, version='', size=-1, summary='', icon=None,
                  manual=True, installation='', removable=True, level='user'):
         super().__init__()
@@ -863,7 +865,17 @@ class Window(Adw.ApplicationWindow):
     def add_text_column(self, title, text, key, width, xalign=0):
         f = Gtk.SignalListItemFactory()
         f.connect('setup', lambda _f, li: li.set_child(Gtk.Label(xalign=xalign, ellipsize=3)))
-        f.connect('bind', lambda _f, li: li.get_child().set_label(text(li.get_item())))
+
+        def bind(_f, li):
+            item, lbl = li.get_item(), li.get_child()
+            lbl.set_label(text(item))
+            li.handler = item.connect('changed', lambda it: lbl.set_label(text(it)))
+
+        def unbind(_f, li):
+            li.get_item().disconnect(li.handler)
+
+        f.connect('bind', bind)
+        f.connect('unbind', unbind)
         col = Gtk.ColumnViewColumn(title=title, factory=f, fixed_width=width, resizable=True)
         col.set_sorter(Gtk.CustomSorter.new(lambda a, b, _: ordering(key(a), key(b)), None))
         self.cv.append_column(col)
@@ -885,12 +897,13 @@ class Window(Adw.ApplicationWindow):
                         item.size = sum(entry_size(e) for e in plan_local(item) if e['group'] == 'program') or -1
                     except OSError:
                         continue
-            GLib.idle_add(self.refresh_rows)
+            GLib.idle_add(self.refresh_rows, apps)
         threading.Thread(target=work, daemon=True).start()
 
-    def refresh_rows(self):
-        n = self.apps_store.get_n_items()
-        self.apps_store.items_changed(0, n, n)
+    def refresh_rows(self, apps):
+        for item in apps:
+            if item.local:
+                item.emit('changed')
         self.update_status()
 
     def loaded(self, apps, pkgs):
@@ -1102,8 +1115,12 @@ class Window(Adw.ApplicationWindow):
                 cb.set_child(lbl)
                 box.append(cb)
                 checks.append((cb, e))
-        dlg.set_extra_child(Gtk.ScrolledWindow(child=box, max_content_height=320, propagate_natural_height=True,
-                                               hscrollbar_policy=Gtk.PolicyType.NEVER))
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+        box.set_margin_bottom(8)
+        scroll = Gtk.ScrolledWindow(child=box, max_content_height=300, propagate_natural_height=True,
+                                    hscrollbar_policy=Gtk.PolicyType.NEVER)
+        dlg.set_extra_child(Gtk.Frame(child=scroll))
 
         def on_resp(_d, resp):
             chosen = [e for cb, e in checks if cb.get_active()]
