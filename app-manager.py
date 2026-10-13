@@ -641,11 +641,13 @@ class Window(Adw.ApplicationWindow):
                                             description='Измените запрос или фильтры'), 'empty')
 
         # --- Нижняя панель
-        self.status = Gtk.Label(xalign=0, hexpand=True, css_classes=['dim-label'])
+        self.status = Gtk.Label(xalign=0, hexpand=True, ellipsize=3, css_classes=['dim-label'])
         self.remove_btn = Gtk.Button(label='Удалить', css_classes=['destructive-action'], sensitive=False)
         self.remove_btn.connect('clicked', lambda *_: self.on_remove())
         bottom = Gtk.Box(spacing=8, margin_start=12, margin_end=12, margin_top=8, margin_bottom=8)
+        self.disk_box = Gtk.Box(spacing=12, margin_end=12)
         bottom.append(self.status)
+        bottom.append(self.disk_box)
         bottom.append(self.remove_btn)
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -767,6 +769,7 @@ class Window(Adw.ApplicationWindow):
         self.pkgs_store.splice(0, self.pkgs_store.get_n_items(), pkgs)
         self.levels = {p.pkg.split(':')[0]: p.level for p in pkgs if p.source == 'apt'}
         self.compute_local_sizes(apps)
+        self.update_disk()
         self.stack.set_visible_child_name('list')
         self.update_status()
         self.update_buttons()
@@ -792,6 +795,38 @@ class Window(Adw.ApplicationWindow):
         self.manual_only.set_visible(self.mode == 'pkgs')
         self.filter_model.set_model(self.apps_store if self.mode == 'apps' else self.pkgs_store)
         self.refilter()
+
+    def update_disk(self):
+        """Занятое и свободное место на дисках с системой и домашней папкой."""
+        while (child := self.disk_box.get_first_child()):
+            self.disk_box.remove(child)
+        seen = set()
+        for mount, title in (('/', 'Диск'), (HOME, 'Домашний диск')):
+            try:
+                st = os.statvfs(mount)
+                dev = os.stat(mount).st_dev
+            except OSError:
+                continue
+            if dev in seen or not st.f_blocks:
+                continue
+            seen.add(dev)
+            total = st.f_blocks * st.f_frsize
+            used = (st.f_blocks - st.f_bfree) * st.f_frsize
+            free = st.f_bavail * st.f_frsize
+            frac = used / total
+            name = 'Диск' if len(seen) == 1 else title
+            bar = Gtk.LevelBar(value=frac, width_request=120, valign=Gtk.Align.CENTER)
+            bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_LOW, 0.75)
+            bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_HIGH, 0.9)
+            bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_FULL, 1.0)
+            lbl = Gtk.Label(label=f'{name}: занято {human_size(used)} из {human_size(total)}  •  '
+                                  f'свободно {human_size(free)}')
+            if frac > 0.9:
+                lbl.add_css_class('error')
+            box = Gtk.Box(spacing=8, tooltip_text=f'{mount}: занято {frac:.0%}')
+            box.append(lbl)
+            box.append(bar)
+            self.disk_box.append(box)
 
     def update_status(self):
         if self.stack.get_visible_child_name() != 'loading':
